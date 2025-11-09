@@ -92,23 +92,6 @@ Multiple ways to access your telemetry data:
 
 Blueplane Telemetry Core is designed with privacy as the top priority:
 
-### What We DON'T Capture
-
-- Source code content
-- File names or full paths
-- User prompts (text content)
-- API keys or credentials
-- Personal information
-
-### What We DO Capture
-
-- Timing and performance metrics
-- Tool usage patterns
-- File extensions only
-- Acceptance/rejection events
-- Session metadata
-- Model information
-
 ### Local-Only Architecture
 
 - All data stored locally on your machine
