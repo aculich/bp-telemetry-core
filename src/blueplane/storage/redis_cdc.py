@@ -84,10 +84,37 @@ class CDCWorkQueue:
         - Execute XREADGROUP with block timeout
         - Yield (message_id, event) pairs
         - Blocks until events available
+        - Also checks pending messages for this consumer
         """
         while True:
             try:
-                # XREADGROUP: read from stream for this consumer
+                # First, try to claim any pending messages for this consumer
+                pending = self.redis.xpending_range(
+                    name=self.stream_key,
+                    groupname=self.consumer_group,
+                    min="-",
+                    max="+",
+                    count=count,
+                )
+                
+                # Claim pending messages older than 5 seconds
+                if pending:
+                    pending_ids = [msg["message_id"] for msg in pending]
+                    claimed = self.redis.xclaim(
+                        name=self.stream_key,
+                        groupname=self.consumer_group,
+                        consumername=consumer_name,
+                        min_idle_time=5000,  # 5 seconds
+                        message_ids=pending_ids,
+                    )
+                    
+                    # Process claimed messages
+                    for message_id, fields in claimed:
+                        event_json = fields.get("event", "{}")
+                        event = json.loads(event_json)
+                        yield (message_id, event)
+                
+                # Then read new messages
                 messages = self.redis.xreadgroup(
                     groupname=self.consumer_group,
                     consumername=consumer_name,
@@ -96,15 +123,16 @@ class CDCWorkQueue:
                     block=block,
                 )
                 
-                if not messages:
-                    continue
-                
-                # Parse messages
-                stream_name, message_list = messages[0]
-                for message_id, fields in message_list:
-                    event_json = fields.get("event", "{}")
-                    event = json.loads(event_json)
-                    yield (message_id, event)
+                if messages:
+                    # Parse messages
+                    stream_name, message_list = messages[0]
+                    for message_id, fields in message_list:
+                        event_json = fields.get("event", "{}")
+                        event = json.loads(event_json)
+                        yield (message_id, event)
+                else:
+                    # No messages, wait a bit before trying again
+                    await asyncio.sleep(0.1)
                     
             except Exception as e:
                 # Log error but continue
