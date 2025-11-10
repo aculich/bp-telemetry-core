@@ -162,15 +162,28 @@ python scripts/run_api_server.py
 ### Install in Development Mode
 
 ```bash
+# Activate virtual environment
+source scripts/activate_venv.sh
+# Or manually:
 source .venv/bin/activate
+
+# Install in editable mode (if not already done by setup_venv.sh)
 pip install -e .
 ```
 
 ### Run Tests
 
 ```bash
-# TODO: Add tests
+# Run all tests
 pytest tests/
+
+# Run specific test suites
+pytest tests/unit/          # Unit tests
+pytest tests/integration/   # Integration tests
+pytest tests/e2e/           # End-to-end tests
+
+# Run with coverage
+pytest --cov=src tests/
 ```
 
 ### Code Style

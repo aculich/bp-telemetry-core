@@ -21,7 +21,7 @@ Blueplane Telemetry Core is an open-source system for capturing, processing, and
 - **Multi-Platform**: Supports Claude Code, Cursor, and extensible to other AI assistants
 - **Real-Time Analytics**: Sub-second metrics updates with async processing pipeline
 - **Rich Insights**: Track acceptance rates, productivity, tool usage, and conversation patterns
-- **Zero Configuration**: Embedded databases (DuckDB, SQLite, Redis) with no setup required
+- **Zero Configuration**: Embedded databases (SQLite, Redis) with minimal setup required
 - **Multiple Interfaces**: CLI, MCP Server, and Web Dashboard for accessing your data
 
 ## Architecture
@@ -38,7 +38,39 @@ See [Architecture Overview](./docs/ARCHITECTURE.md) for detailed information.
 
 ### Installation
 
-TBD
+1. **Clone the repository**:
+   ```bash
+   git clone <repository-url>
+   cd experiment/core
+   ```
+
+2. **Set up virtual environment**:
+   ```bash
+   ./scripts/setup_venv.sh
+   source scripts/activate_venv.sh
+   ```
+
+3. **Verify setup**:
+   ```bash
+   python scripts/test_setup.py
+   ```
+
+4. **Start the servers** (in separate terminals):
+   ```bash
+   # Terminal 1: Processing server
+   python scripts/run_server.py
+   
+   # Terminal 2: API server
+   python scripts/run_api_server.py
+   ```
+
+5. **Use the CLI**:
+   ```bash
+   blueplane metrics
+   blueplane sessions
+   ```
+
+See [SETUP.md](./SETUP.md) for detailed setup instructions.
 
 ## Use Cases
 
@@ -74,7 +106,7 @@ High-performance async pipeline for event processing:
 
 - **Fast Path**: Zero-latency raw event ingestion (<1ms P95)
 - **Slow Path**: Async workers for metrics calculation and conversation reconstruction
-- **Storage**: DuckDB for raw traces, SQLite for conversations, Redis for real-time metrics
+- **Storage**: SQLite for raw traces and conversations, Redis for real-time metrics
 
 [Learn more →](./docs/architecture/layer2_async_pipeline.md)
 
@@ -119,8 +151,8 @@ Blueplane Telemetry Core is optimized for minimal overhead:
 
 ## Technology Stack
 
-- **Languages**: Python 3.11+, TypeScript (Dashboard)
-- **Databases**: DuckDB, SQLite, Redis
+- **Languages**: Python 3.11+ (TypeScript for Dashboard - planned)
+- **Databases**: SQLite, Redis
 - **CLI**: Rich, Plotext, Click
 - **Async**: asyncio, aiohttp, httpx
 - **Web**: FastAPI, React (Dashboard)
@@ -129,12 +161,14 @@ Blueplane Telemetry Core is optimized for minimal overhead:
 
 ### Phase 1: MVP (Current)
 
+- [x] Layer 2 async pipeline with fast/slow paths
+- [x] Layer 3 CLI interface
+- [x] Core metrics and analytics
+- [x] MCP Server implementation (basic)
+- [x] REST API and WebSocket endpoints
 - [ ] Layer 1 capture for Claude Code and Cursor
-- [ ] Layer 2 async pipeline with fast/slow paths
-- [ ] Layer 3 CLI interface
-- [ ] Core metrics and analytics
-- [ ] MCP Server implementation
 - [ ] Web Dashboard (basic)
+- [ ] Enhanced MCP tools (Analysis, Search, Optimization)
 
 ## Contributing
 
@@ -142,7 +176,30 @@ We welcome contributions! See the documentation in [./docs/](./docs/) for techni
 
 ### Development Setup
 
-TBD
+1. **Set up development environment**:
+   ```bash
+   cd experiment/core
+   ./scripts/setup_venv.sh
+   source scripts/activate_venv.sh
+   ```
+
+2. **Install in development mode** (if not already done):
+   ```bash
+   pip install -e .
+   ```
+
+3. **Run tests**:
+   ```bash
+   pytest tests/
+   ```
+
+4. **Code style**:
+   ```bash
+   black src/
+   ruff check src/
+   ```
+
+See [SETUP.md](./SETUP.md) for more details.
 
 ## License
 
