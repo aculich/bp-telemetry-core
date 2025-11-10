@@ -1,0 +1,155 @@
+{
+  "$schema": "https://cursor.sh/hooks-schema.json",
+  "version": 1,
+  "description": "Blueplane Telemetry Core - Cursor Hooks Configuration",
+  "hooks": {
+    "beforeSubmitPrompt": [
+      {
+        "command": "hooks/before_submit_prompt.py",
+        "args": [
+          "--workspace-root",
+          "${workspaceRoot}",
+          "--generation-id",
+          "${generationId}",
+          "--prompt-length",
+          "${promptLength}"
+        ],
+        "enabled": true,
+        "timeout": 1000
+      }
+    ],
+    "afterAgentResponse": [
+      {
+        "command": "hooks/after_agent_response.py",
+        "args": [
+          "--generation-id",
+          "${generationId}",
+          "--response-length",
+          "${responseLength}",
+          "--tokens-used",
+          "${tokensUsed}",
+          "--model",
+          "${model}",
+          "--duration-ms",
+          "${durationMs}"
+        ],
+        "enabled": true,
+        "timeout": 1000
+      }
+    ],
+    "beforeMCPExecution": [
+      {
+        "command": "hooks/before_mcp_execution.py",
+        "args": [
+          "--tool-name",
+          "${toolName}",
+          "--input-size",
+          "${inputSize}",
+          "--generation-id",
+          "${generationId}"
+        ],
+        "enabled": true,
+        "timeout": 1000
+      }
+    ],
+    "afterMCPExecution": [
+      {
+        "command": "hooks/after_mcp_execution.py",
+        "args": [
+          "--tool-name",
+          "${toolName}",
+          "--success",
+          "${success}",
+          "--duration-ms",
+          "${durationMs}",
+          "--output-size",
+          "${outputSize}",
+          "--error-message",
+          "${errorMessage}"
+        ],
+        "enabled": true,
+        "timeout": 1000
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": "hooks/after_file_edit.py",
+        "args": [
+          "--file-extension",
+          "${fileExtension}",
+          "--lines-added",
+          "${linesAdded}",
+          "--lines-removed",
+          "${linesRemoved}",
+          "--operation",
+          "${operation}",
+          "--generation-id",
+          "${generationId}"
+        ],
+        "enabled": true,
+        "timeout": 1000
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": "hooks/before_shell_execution.py",
+        "args": [
+          "--command-length",
+          "${commandLength}",
+          "--generation-id",
+          "${generationId}"
+        ],
+        "enabled": true,
+        "timeout": 1000
+      }
+    ],
+    "afterShellExecution": [
+      {
+        "command": "hooks/after_shell_execution.py",
+        "args": [
+          "--exit-code",
+          "${exitCode}",
+          "--duration-ms",
+          "${durationMs}",
+          "--output-lines",
+          "${outputLines}"
+        ],
+        "enabled": true,
+        "timeout": 1000
+      }
+    ],
+    "beforeReadFile": [
+      {
+        "command": "hooks/before_read_file.py",
+        "args": [
+          "--file-extension",
+          "${fileExtension}",
+          "--file-size",
+          "${fileSize}"
+        ],
+        "enabled": true,
+        "timeout": 1000
+      }
+    ],
+    "stop": [
+      {
+        "command": "hooks/stop.py",
+        "args": [
+          "--session-duration-ms",
+          "${sessionDurationMs}"
+        ],
+        "enabled": true,
+        "timeout": 1000
+      }
+    ]
+  },
+  "environment": {
+    "CURSOR_SESSION_ID": "${sessionId}",
+    "CURSOR_WORKSPACE_HASH": "${workspaceHash}"
+  },
+  "settings": {
+    "failOnError": false,
+    "logLevel": "info",
+    "logFile": ".cursor/hooks.log"
+  }
+}
