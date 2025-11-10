@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""
+Cursor afterMCPExecution hook.
+Called after MCP tool execution.
+"""
+
+import sys
+from pathlib import Path
+
+# Add blueplane to path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
+
+from blueplane.capture.cursor_hooks import after_mcp_execution
+
+if __name__ == "__main__":
+    after_mcp_execution()
+

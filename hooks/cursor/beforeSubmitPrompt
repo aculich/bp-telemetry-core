@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""
+Cursor beforeSubmitPrompt hook.
+Called before user submits a prompt.
+"""
+
+import sys
+from pathlib import Path
+
+# Add blueplane to path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
+
+from blueplane.capture.cursor_hooks import before_submit_prompt
+
+if __name__ == "__main__":
+    before_submit_prompt()
+

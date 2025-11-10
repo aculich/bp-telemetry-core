@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""
+Cursor stop hook.
+Called when session stops.
+"""
+
+import sys
+from pathlib import Path
+
+# Add blueplane to path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
+
+from blueplane.capture.cursor_hooks import stop
+
+if __name__ == "__main__":
+    stop()
+
