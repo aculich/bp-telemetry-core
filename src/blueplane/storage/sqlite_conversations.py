@@ -347,6 +347,25 @@ class ConversationStorage:
         
         return [dict(row) for row in cursor]
 
+    def get_all_conversations(self, limit: int = 50, offset: int = 0, platform: Optional[str] = None) -> List[Dict]:
+        """Get all conversations with pagination (for Layer 3 access)."""
+        query = """
+            SELECT id, session_id, external_session_id, platform, started_at, ended_at,
+                   interaction_count, acceptance_rate, total_tokens, total_changes
+            FROM conversations
+        """
+        params = []
+        
+        if platform:
+            query += " WHERE platform = ?"
+            params.append(platform)
+        
+        query += " ORDER BY started_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        
+        cursor = self.conn.execute(query, params)
+        return [dict(row) for row in cursor]
+
     def get_global_acceptance_metrics(self) -> Dict:
         """Get global acceptance rate metrics (for Layer 3 dashboards)."""
         cursor = self.conn.execute("""

@@ -93,6 +93,16 @@ async def get_metrics(
             session = metrics_storage.get_latest_metrics(category="session")
             tools = metrics_storage.get_latest_metrics(category="tools")
             
+            # If no metrics in Redis, calculate from conversations
+            if not session and not tools:
+                global_metrics = conversation_storage.get_global_acceptance_metrics()
+                if global_metrics:
+                    session = {
+                        "acceptance_rate": global_metrics.get("avg_acceptance_rate", 0) or 0,
+                        "total_conversations": global_metrics.get("total_conversations", 0) or 0,
+                        "total_changes": global_metrics.get("total_changes", 0) or 0,
+                    }
+            
             return MetricsResponse(
                 realtime=realtime,
                 session=session,
@@ -161,12 +171,27 @@ async def list_sessions(
     Returns conversation summaries for Layer 3 access.
     """
     try:
-        # Get all conversations (simplified - in production, add filtering)
-        # For now, we'll return empty list as we need to implement session listing
-        # This would require querying conversations table
+        conversations = conversation_storage.get_all_conversations(
+            limit=limit,
+            offset=offset,
+            platform=platform,
+        )
         
-        # TODO: Implement proper session listing
-        return []
+        return [
+            ConversationSummary(
+                id=conv.get("id", ""),
+                session_id=conv.get("session_id", ""),
+                external_session_id=conv.get("external_session_id", ""),
+                platform=conv.get("platform", "unknown"),
+                started_at=conv.get("started_at", ""),
+                ended_at=conv.get("ended_at"),
+                interaction_count=conv.get("interaction_count", 0),
+                acceptance_rate=conv.get("acceptance_rate"),
+                total_tokens=conv.get("total_tokens", 0),
+                total_changes=conv.get("total_changes", 0),
+            )
+            for conv in conversations
+        ]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error listing sessions: {str(e)}")
 
