@@ -5,8 +5,48 @@ Based on Ben's request and codebase analysis, this document outlines the tasks f
 ## Overview
 
 This work focuses on two main areas:
-1. **Health Monitoring Layer**: At-a-glance view of system health (Redis queue, database writes, hook/trace capture)
+1. **Health Monitoring Layer**: Simple at-a-glance view of system health with chain of custody tracking (Redis queue → database writes)
 2. **Packaging Exploration**: Research and implement distribution strategy
+
+## Product Requirements
+
+- **Health monitor with chain of custody visibility**: Track messages from Redis queue enqueue → database write success
+- **Real-time monitoring of Redis queue operations**: See when things are getting enqueued and moving through
+- **Database write success/failure tracking**: Monitor worker processing to write to the database
+- **Dead letter queue monitoring integration**: Dead letter queue is implemented, needs visibility
+- **Live database connection implementation**: Dependency on live database connection for real-time monitoring
+- **Packaging system for distribution**: Start looking at packaging the system
+- **Telemetry visualization interfaces** (future): Foundation for future visualization tools
+
+## User Stories
+
+- **As a developer**, I want to see when messages are enqueued to Redis so that I can verify the ingestion pipeline is working
+- **As a system administrator**, I want to monitor the chain of custody from queue to database so that I can identify failure points
+- **As a developer**, I want visibility into dead letter queue activity so that I can troubleshoot failed message processing
+- **As a user**, I want the system to trigger ingests from hooks at end-of-turn so that I get real-time trace collection
+- **As a developer**, I want live database connections so that I can monitor system health in real-time
+
+## Objectives and Goals
+
+- Implement comprehensive health monitoring for telemetry pipeline
+- Establish reliable chain of custody tracking from ingestion to storage
+- Create packaging system for distribution
+- Maintain development momentum while enabling collaborative contribution
+- **Prioritize Cursor implementation** as foundation for Claude features (Cursor focus first)
+- Build robust observability infrastructure for future visualization tools
+
+## System Context (Ben's Update)
+
+**Current System State:**
+- Claude and Cursor hooks/traces are ingested into a `raw_traces` DB table
+- Components: user-level hooks, Cursor extension managing sessions, Redis worker queue, simple Python server writing to SQLite
+- Current ingestion: async process pulls from Cursor's workspace-level SQLite into own DB
+- **File watcher exists but may be removed** in favor of hook-triggered ingest at end-of-turn
+
+**Key Monitoring Need:**
+- See chain of custody: things getting enqueued to Redis queue successfully → written to database successfully
+- Dead letter queue is implemented, needs visibility
+- Simple health monitor to track messages and system status
 
 ---
 
@@ -36,24 +76,25 @@ This work focuses on two main areas:
 
 **Location**: `src/blueplane/monitoring/queue_health.py` (new file)
 
-**Requirements:**
-- Monitor `telemetry:events` stream health
-- Track queue depth (XINFO STREAM)
-- Track consumer lag (XPENDING analysis)
-- Track consumer group health (XINFO GROUPS)
-- Track dead letter queue size (`telemetry:dlq`)
+**Requirements (from Ben's request):**
+- **See when things are getting enqueued to that queue** - Track enqueue operations
+- **When they're moving through** - Monitor processing flow
+- **Dead letter queue monitoring** - Dead letter queue is implemented, needs visibility
+- Track queue depth and consumer lag
 - Calculate processing rate (events/second)
 - Detect stuck consumers
 
 **Metrics to Track:**
 ```python
 {
-    "queue_depth": int,              # Current stream length
+    "queue_depth": int,              # Current stream length (telemetry:events)
     "pending_messages": int,         # Unprocessed messages in PEL
     "oldest_pending_age_ms": int,     # Age of oldest pending message
     "consumer_count": int,            # Active consumers in group
     "processing_rate_events_per_sec": float,
-    "dlq_size": int,                 # Dead letter queue size
+    "dlq_size": int,                 # Dead letter queue size (telemetry:dlq) - PRIORITY
+    "dlq_recent_entries": int,        # Entries added to DLQ in last hour
+    "enqueue_rate_events_per_sec": float,  # Rate of messages being enqueued
     "consumer_lag_ms": int,           # Time since last processed message
     "health_status": "green|yellow|orange|red"
 }
@@ -62,166 +103,170 @@ This work focuses on two main areas:
 **Implementation Tasks:**
 - [ ] Create `QueueHealthMonitor` class
 - [ ] Implement Redis Stream info collection (XINFO, XPENDING)
+- [ ] **Track enqueue operations** - Monitor XADD to `telemetry:events`
+- [ ] **Monitor dead letter queue** - Track `telemetry:dlq` stream size and recent entries
 - [ ] Calculate processing rate from stream timestamps
+- [ ] Calculate enqueue rate (messages/second being added)
 - [ ] Detect stuck consumers (no ACK in >30 seconds)
 - [ ] Add health status calculation (green/yellow/orange/red thresholds)
 - [ ] Add to health monitoring service
 
 **Thresholds:**
-- Green: queue_depth < 1000, pending < 100, lag < 5s
-- Yellow: queue_depth 1000-10000, pending 100-1000, lag 5-30s
-- Orange: queue_depth 10000-50000, pending 1000-5000, lag 30-60s
-- Red: queue_depth > 50000, pending > 5000, lag > 60s
+- Green: queue_depth < 1000, pending < 100, lag < 5s, dlq_size = 0
+- Yellow: queue_depth 1000-10000, pending 100-1000, lag 5-30s, dlq_size < 10
+- Orange: queue_depth 10000-50000, pending 1000-5000, lag 30-60s, dlq_size 10-100
+- Red: queue_depth > 50000, pending > 5000, lag > 60s, dlq_size > 100
 
 ### 1.2 Database Write Health Monitoring
 
 **Location**: `src/blueplane/monitoring/database_health.py` (new file)
 
-**Requirements:**
-- Monitor SQLite write performance
-- Track write latency (P50, P95, P99)
+**Requirements (from Ben's request):**
+- **Worker processing to write to the database** - Track successful writes
+- **Chain of custody**: Messages enqueued → written to database successfully
+- **Database write success/failure tracking** - Critical for identifying failure points
+- Monitor SQLite write performance and errors
 - Track write throughput (events/second)
-- Monitor database file size and growth rate
-- Check WAL file size
-- Monitor compression ratio
-- Track write errors/failures
 
 **Metrics to Track:**
 ```python
 {
-    "write_latency_p50_ms": float,
-    "write_latency_p95_ms": float,
-    "write_latency_p99_ms": float,
+    "write_success_count": int,       # Successful writes (chain of custody)
+    "write_failure_count": int,       # Failed writes (chain of custody break)
+    "write_success_rate": float,      # Success rate (0.0-1.0)
+    "write_latency_p95_ms": float,    # P95 latency for writes
     "write_throughput_events_per_sec": float,
+    "last_successful_write_timestamp": str,  # Last successful write time
+    "last_failed_write_timestamp": str,      # Last failed write time
     "db_size_mb": float,
     "wal_size_mb": float,
-    "compression_ratio": float,      # compressed_size / uncompressed_size
-    "write_errors_count": int,
-    "last_write_timestamp": str,
     "health_status": "green|yellow|orange|red"
 }
 ```
 
+**Chain of Custody Tracking:**
+- Track message IDs from Redis queue → database write
+- Identify messages that were enqueued but never written (chain break)
+- Correlate DLQ entries with failed database writes
+
 **Implementation Tasks:**
 - [ ] Create `DatabaseHealthMonitor` class
-- [ ] Instrument `SQLiteBatchWriter.write_batch()` with timing
-- [ ] Track write latencies using histogram
-- [ ] Calculate compression ratio from batch stats
+- [ ] Instrument `SQLiteBatchWriter.write_batch()` with timing and success/failure tracking
+- [ ] **Track chain of custody**: Correlate message IDs from queue to database writes
+- [ ] Track write latencies (P95 sufficient for simple monitor)
 - [ ] Monitor database file size (periodic checks)
 - [ ] Track WAL file size
-- [ ] Add error counting
+- [ ] Add error counting and failure tracking
 - [ ] Add to health monitoring service
 
 **Thresholds:**
-- Green: P95 < 10ms, throughput > 100 events/sec, no errors
-- Yellow: P95 10-50ms, throughput 50-100 events/sec, <1% errors
-- Orange: P95 50-100ms, throughput 10-50 events/sec, 1-5% errors
-- Red: P95 > 100ms, throughput < 10 events/sec, >5% errors
+- Green: success_rate > 99%, P95 < 10ms, throughput > 100 events/sec
+- Yellow: success_rate 95-99%, P95 10-50ms, throughput 50-100 events/sec
+- Orange: success_rate 90-95%, P95 50-100ms, throughput 10-50 events/sec
+- Red: success_rate < 90%, P95 > 100ms, throughput < 10 events/sec
 
 ### 1.3 Hook and Trace Capture Health Monitoring
 
 **Location**: `src/blueplane/monitoring/capture_health.py` (new file)
 
-**Requirements:**
-- Monitor hook execution (Claude Code and Cursor)
-- Track hook success/failure rates
-- Monitor transcript file processing
-- Monitor database monitor (Cursor) health
-- Track event capture rate by platform
-- Detect missing hooks or inactive capture
+**Requirements (from Ben's request):**
+- **Focus on Cursor** (not Claude) - Cursor implementation is priority
+- Monitor Cursor hook execution and success/failure rates
+- Monitor database monitor (Cursor) health - async process pulling from Cursor's workspace SQLite
+- Track event capture rate
+- **Note**: File watcher exists but may be removed in favor of hook-triggered ingest
 
 **Metrics to Track:**
 ```python
 {
-    "claude_hooks": {
-        "total_executions": int,
-        "success_count": int,
-        "failure_count": int,
-        "success_rate": float,
-        "last_execution_timestamp": str,
-        "hooks_active": {
-            "SessionStart": bool,
-            "PreToolUse": bool,
-            "PostToolUse": bool,
-            "UserPromptSubmit": bool,
-            "Stop": bool,
-            "PreCompact": bool
-        }
-    },
     "cursor_hooks": {
         "total_executions": int,
         "success_count": int,
         "failure_count": int,
         "success_rate": float,
         "last_execution_timestamp": str,
-        "hooks_active": {...}  # Similar to Claude
-    },
-    "transcript_monitor": {
-        "active": bool,
-        "files_monitored": int,
-        "lines_processed": int,
-        "last_activity_timestamp": str,
-        "errors_count": int
+        "hooks_active": {
+            "beforeSubmitPrompt": bool,
+            "afterAgentResponse": bool,
+            "beforeMCPExecution": bool,
+            "afterMCPExecution": bool,
+            "afterFileEdit": bool,
+            "stop": bool
+        }
     },
     "database_monitor": {
         "active": bool,
         "sessions_monitored": int,
         "events_captured": int,
         "last_activity_timestamp": str,
-        "errors_count": int
+        "errors_count": int,
+        "ingest_rate_events_per_min": float  # From Cursor workspace SQLite
     },
-    "capture_rate_events_per_min": float,
+    "capture_rate_events_per_min": float,  # Overall capture rate
     "health_status": "green|yellow|orange|red"
 }
 ```
 
 **Implementation Tasks:**
 - [ ] Create `CaptureHealthMonitor` class
-- [ ] Add hook execution tracking to `MessageQueueWriter.enqueue()`
-  - Track success/failure per hook type
+- [ ] **Focus on Cursor hooks** - Add hook execution tracking to `MessageQueueWriter.enqueue()`
+  - Track success/failure per Cursor hook type
   - Track last execution timestamp
-- [ ] Add transcript monitor health tracking
-  - Monitor `TranscriptMonitor` activity
-  - Track files monitored and lines processed
-- [ ] Add database monitor health tracking
-  - Monitor `CursorDatabaseMonitor` activity
-  - Track sessions and events captured
+- [ ] **Monitor Cursor database monitor** - Track `CursorDatabaseMonitor` activity
+  - Monitor async process pulling from Cursor's workspace SQLite
+  - Track sessions monitored and events captured
+  - Track ingest rate
 - [ ] Calculate capture rate from recent events
 - [ ] Detect inactive hooks (no events in >5 minutes)
 - [ ] Add to health monitoring service
+- [ ] **Note**: Claude hooks can be added later (lower priority)
 
 **Thresholds:**
-- Green: success_rate > 99%, capture_rate > 10 events/min, all monitors active
-- Yellow: success_rate 95-99%, capture_rate 5-10 events/min, some monitors inactive
-- Orange: success_rate 90-95%, capture_rate 1-5 events/min, monitors inactive
-- Red: success_rate < 90%, capture_rate < 1 events/min, monitors down
+- Green: success_rate > 99%, capture_rate > 10 events/min, database monitor active
+- Yellow: success_rate 95-99%, capture_rate 5-10 events/min, database monitor intermittent
+- Orange: success_rate 90-95%, capture_rate 1-5 events/min, database monitor inactive
+- Red: success_rate < 90%, capture_rate < 1 events/min, database monitor down
 
 ### 1.4 Unified Health Monitoring Service
 
 **Location**: `src/blueplane/monitoring/health_service.py` (new file)
 
-**Requirements:**
-- Aggregate health from all monitors
-- Provide at-a-glance status endpoint
-- Store health metrics in Redis (time-series)
+**Requirements (from Ben's request):**
+- **Simple health monitor** to track messages and system status
+- **Chain of custody visibility**: Enqueued to Redis queue successfully → written to database successfully
+- **At-a-glance status** - Simple, not complex
+- Provide live database connection for real-time monitoring
 - Expose health metrics via API
-- Provide health dashboard data
 
 **API Endpoints:**
-- `GET /api/v1/health` - Overall system health (enhanced)
-- `GET /api/v1/health/queue` - Queue-specific health
-- `GET /api/v1/health/database` - Database-specific health
-- `GET /api/v1/health/capture` - Capture-specific health
-- `GET /api/v1/health/metrics` - Historical health metrics
+- `GET /api/v1/health` - Overall system health (enhanced with chain of custody)
+- `GET /api/v1/health/queue` - Queue-specific health (enqueue rate, DLQ)
+- `GET /api/v1/health/database` - Database-specific health (write success/failure)
+- `GET /api/v1/health/capture` - Capture-specific health (Cursor hooks, database monitor)
+- `GET /api/v1/health/chain` - **Chain of custody endpoint** - Messages enqueued → written
+
+**Chain of Custody Endpoint Response:**
+```python
+{
+    "chain_status": "healthy|degraded|broken",
+    "messages_enqueued_last_hour": int,
+    "messages_written_last_hour": int,
+    "messages_in_dlq": int,
+    "chain_break_count": int,  # Enqueued but not written
+    "last_chain_break_timestamp": str,
+    "success_rate": float  # Written / Enqueued
+}
+```
 
 **Implementation Tasks:**
 - [ ] Create `HealthService` class
 - [ ] Integrate `QueueHealthMonitor`, `DatabaseHealthMonitor`, `CaptureHealthMonitor`
+- [ ] **Implement chain of custody tracking** - Correlate enqueued messages with database writes
 - [ ] Calculate overall health status (worst of all components)
-- [ ] Store health metrics in Redis TimeSeries (1-minute intervals)
+- [ ] Store health metrics in Redis (simple key-value, not necessarily TimeSeries initially)
 - [ ] Create FastAPI endpoints for health data
 - [ ] Add health metrics to existing `/health` endpoint
-- [ ] Create health dashboard data endpoint (for future UI)
+- [ ] **Create chain of custody endpoint** (`/api/v1/health/chain`)
 
 **Health Status Calculation:**
 ```python
@@ -432,15 +477,23 @@ blueplane-telemetry-core/
 
 ## Implementation Priority
 
-### Phase 1: Core Health Monitoring (High Priority)
-1. Redis Queue Health Monitoring (1.1)
-2. Database Write Health Monitoring (1.2)
-3. Unified Health Service (1.4) - Basic version
+### Phase 1: Core Chain of Custody Monitoring (High Priority - Ben's Immediate Need)
+1. **Redis Queue Health Monitoring (1.1)** - See when things are getting enqueued
+   - Track enqueue operations
+   - Monitor dead letter queue (DLQ is implemented, needs visibility)
+2. **Database Write Health Monitoring (1.2)** - Worker processing to write to database
+   - Track write success/failure
+   - Chain of custody: enqueued → written
+3. **Unified Health Service (1.4) - Chain of Custody Endpoint**
+   - Simple health monitor
+   - Chain of custody visibility endpoint
 
 ### Phase 2: Capture Health Monitoring (Medium Priority)
-4. Hook and Trace Capture Health (1.3)
-5. Health Metrics Storage (1.5)
-6. Enhanced Health Service (1.4) - Full version
+4. **Cursor Hook and Capture Health (1.3)** - Focus on Cursor (not Claude)
+   - Monitor Cursor hook execution
+   - Monitor Cursor database monitor (async process from workspace SQLite)
+5. Health Metrics Storage (1.5) - Simple Redis storage
+6. Enhanced Health Service (1.4) - Full version with all endpoints
 
 ### Phase 3: Packaging Research (Medium Priority)
 7. Packaging Strategy Research (2.1)
@@ -457,9 +510,14 @@ blueplane-telemetry-core/
 
 ## Notes
 
+- **Keep it simple** - Ben requested a "simple health monitor", not an enterprise monitoring solution
 - Health monitoring should be lightweight and not impact performance
+- **Chain of custody is the key requirement** - Track messages from Redis queue → database write
+- **Dead letter queue monitoring is critical** - DLQ is implemented, needs visibility
+- **Focus on Cursor first** - Claude can come later (Ben's prioritization)
 - Consider using Redis for health metrics storage (already in use)
 - Health endpoints should be fast (<10ms response time)
+- **Live database connection** - Dependency for real-time monitoring
 - Packaging should support both development and production use cases
 - Consider backward compatibility when changing package structure
 
