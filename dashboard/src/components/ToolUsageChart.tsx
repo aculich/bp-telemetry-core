@@ -34,7 +34,7 @@ export default function ToolUsageChart({ data }: ToolUsageChartProps) {
           fill="#8884d8"
           dataKey="count"
         >
-          {data.map((entry, index) => (
+          {data.map((_entry, index) => (
             <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
           ))}
         </Pie>
