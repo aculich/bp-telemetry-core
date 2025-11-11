@@ -102,6 +102,63 @@ class FastPathConsumer:
             else:
                 raise
 
+    def _parse_redis_message(self, message_id: Any, fields: Dict[Any, Any]) -> Dict[str, Any]:
+        """
+        Parse a Redis Stream message into a structured event dictionary.
+        
+        Args:
+            message_id: Redis message ID (bytes or str)
+            fields: Dictionary of field key-value pairs from Redis
+            
+        Returns:
+            Dictionary with 'id', 'event', and optionally 'error' keys
+        """
+        msg_id = message_id.decode('utf-8') if isinstance(message_id, bytes) else str(message_id)
+        
+        try:
+            event = {}
+            
+            # Helper to decode field value
+            def decode_field(key, value):
+                if isinstance(value, bytes):
+                    return value.decode('utf-8')
+                return str(value)
+            
+            # Copy top-level fields
+            for key, value in fields.items():
+                key_str = key.decode('utf-8') if isinstance(key, bytes) else str(key)
+                val_str = decode_field(key_str, value)
+                
+                # Parse JSON fields (payload, metadata)
+                if key_str in ('payload', 'metadata'):
+                    try:
+                        event[key_str] = json.loads(val_str)
+                    except json.JSONDecodeError:
+                        event[key_str] = {}
+                else:
+                    # Store other fields as-is
+                    event[key_str] = val_str
+            
+            # Ensure required fields exist
+            if 'event_id' not in event:
+                event['event_id'] = msg_id
+            if 'session_id' not in event:
+                # Use external_session_id if available
+                event['session_id'] = event.get('external_session_id', '')
+            
+            return {
+                'id': msg_id,
+                'event': event
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to parse event from message {msg_id}: {e}")
+            return {
+                'id': msg_id,
+                'event': None,
+                'error': str(e)
+            }
+
     async def _read_messages(self) -> List[Dict[str, Any]]:
         """
         Read messages from Redis Streams using XREADGROUP.
@@ -111,71 +168,23 @@ class FastPathConsumer:
         """
         try:
             # Read from stream with consumer group
-            # Note: redis-py xreadgroup returns list of tuples: [(stream_name, [(id, {field: value}), ...])]
+            # Use current_batch_size for adaptive batching
             messages = self.redis_client.xreadgroup(
                 self.consumer_group,
                 self.consumer_name,
                 {self.stream_name: ">"},
-                count=self.batch_manager.batch_size,
+                count=self.current_batch_size,
                 block=self.block_ms
             )
 
             if not messages:
                 return []
 
-            # Parse messages
-            # queue_writer stores events as flat key-value pairs:
-            # event_id, enqueued_at, platform, hook_type, timestamp, payload (JSON), metadata (JSON), etc.
+            # Parse messages using shared parser
             result = []
             for stream_name, stream_messages in messages:
                 for message_id, fields in stream_messages:
-                    # Convert message_id to string
-                    msg_id = message_id.decode('utf-8') if isinstance(message_id, bytes) else str(message_id)
-                    
-                    try:
-                        # Reconstruct event from flat fields
-                        event = {}
-                        
-                        # Helper to decode field value
-                        def decode_field(key, value):
-                            if isinstance(value, bytes):
-                                return value.decode('utf-8')
-                            return str(value)
-                        
-                        # Copy top-level fields
-                        for key, value in fields.items():
-                            key_str = key.decode('utf-8') if isinstance(key, bytes) else str(key)
-                            val_str = decode_field(key_str, value)
-                            
-                            # Parse JSON fields (payload, metadata)
-                            if key_str in ('payload', 'metadata'):
-                                try:
-                                    event[key_str] = json.loads(val_str)
-                                except json.JSONDecodeError:
-                                    event[key_str] = {}
-                            else:
-                                # Store other fields as-is
-                                event[key_str] = val_str
-                        
-                        # Ensure required fields exist
-                        if 'event_id' not in event:
-                            event['event_id'] = msg_id
-                        if 'session_id' not in event:
-                            # Use external_session_id if available
-                            event['session_id'] = event.get('external_session_id', '')
-                        
-                        result.append({
-                            'id': msg_id,
-                            'event': event
-                        })
-                        
-                    except Exception as e:
-                        logger.error(f"Failed to parse event from message {msg_id}: {e}")
-                        result.append({
-                            'id': msg_id,
-                            'event': None,
-                            'error': str(e)
-                        })
+                    result.append(self._parse_redis_message(message_id, fields))
 
             return result
 
@@ -293,6 +302,7 @@ class FastPathConsumer:
         
         If writes are slow, reduce batch size to prevent memory buildup.
         If writes are fast, increase batch size for better throughput.
+        Updates both current_batch_size and batch_manager.batch_size.
         """
         if len(self.write_times) < 10:
             # Not enough data yet
@@ -306,18 +316,24 @@ class FastPathConsumer:
         
         if avg_latency > target_latency * 2:
             # Writes are slow - reduce batch size
-            self.current_batch_size = max(
+            new_size = max(
                 self.min_batch_size,
                 int(self.current_batch_size * 0.8)
             )
-            logger.debug(f"Reduced batch size to {self.current_batch_size} (avg latency: {avg_latency:.3f}s)")
+            if new_size != self.current_batch_size:
+                self.current_batch_size = new_size
+                self.batch_manager.batch_size = new_size
+                logger.debug(f"Reduced batch size to {self.current_batch_size} (avg latency: {avg_latency:.3f}s)")
         elif avg_latency < target_latency * 0.5:
             # Writes are fast - increase batch size
-            self.current_batch_size = min(
+            new_size = min(
                 self.max_batch_size,
                 int(self.current_batch_size * 1.1)
             )
-            logger.debug(f"Increased batch size to {self.current_batch_size} (avg latency: {avg_latency:.3f}s)")
+            if new_size != self.current_batch_size:
+                self.current_batch_size = new_size
+                self.batch_manager.batch_size = new_size
+                logger.debug(f"Increased batch size to {self.current_batch_size} (avg latency: {avg_latency:.3f}s)")
 
     def _should_throttle_reads(self) -> bool:
         """
@@ -367,45 +383,11 @@ class FastPathConsumer:
                     message_ids=message_ids
                 )
 
-                # Process claimed messages
-                # Parse them the same way as new messages (they have the same field structure)
+                # Process claimed messages using shared parser
                 if claimed:
                     messages = []
                     for msg_id, fields in claimed:
-                        msg_id_str = msg_id.decode('utf-8') if isinstance(msg_id, bytes) else str(msg_id)
-                        
-                        try:
-                            event = {}
-                            
-                            def decode_field(key, value):
-                                if isinstance(value, bytes):
-                                    return value.decode('utf-8')
-                                return str(value)
-                            
-                            for key, value in fields.items():
-                                key_str = key.decode('utf-8') if isinstance(key, bytes) else str(key)
-                                val_str = decode_field(key_str, value)
-                                
-                                if key_str in ('payload', 'metadata'):
-                                    try:
-                                        event[key_str] = json.loads(val_str)
-                                    except json.JSONDecodeError:
-                                        event[key_str] = {}
-                                else:
-                                    event[key_str] = val_str
-                            
-                            # Ensure required fields exist
-                            if 'event_id' not in event:
-                                event['event_id'] = msg_id_str
-                            if 'session_id' not in event:
-                                event['session_id'] = event.get('external_session_id', '')
-                            
-                            messages.append({
-                                'id': msg_id_str,
-                                'event': event
-                            })
-                        except Exception as e:
-                            logger.error(f"Failed to parse claimed message {msg_id_str}: {e}")
+                        messages.append(self._parse_redis_message(msg_id, fields))
 
                     if messages:
                         processed_ids = await self._process_batch(messages)
@@ -447,15 +429,8 @@ class FastPathConsumer:
                     await asyncio.sleep(0.1)  # Wait for writes to catch up
                     continue
 
-                # Read new messages (with adaptive count based on backpressure)
-                read_count = min(
-                    self.current_batch_size,
-                    self.max_batch_size - self.batch_manager.size()
-                )
-                
-                # Temporarily override batch manager count for this read
-                original_count = self.batch_manager.batch_size
-                messages = await self._read_messages_with_count(read_count)
+                # Read new messages (adaptive batch size already set in _adjust_batch_size)
+                messages = await self._read_messages()
 
                 if messages:
                     # Add events to batch with their message IDs
@@ -501,80 +476,6 @@ class FastPathConsumer:
 
         logger.info("Fast path consumer stopped")
 
-    async def _read_messages_with_count(self, count: int) -> List[Dict[str, Any]]:
-        """
-        Read messages with specified count (for backpressure handling).
-        
-        Args:
-            count: Maximum number of messages to read
-            
-        Returns:
-            List of message dictionaries
-        """
-        try:
-            messages = self.redis_client.xreadgroup(
-                self.consumer_group,
-                self.consumer_name,
-                {self.stream_name: ">"},
-                count=count,
-                block=self.block_ms
-            )
-
-            if not messages:
-                return []
-
-            # Parse messages (same logic as _read_messages)
-            result = []
-            for stream_name, stream_messages in messages:
-                for message_id, fields in stream_messages:
-                    msg_id = message_id.decode('utf-8') if isinstance(message_id, bytes) else str(message_id)
-                    
-                    try:
-                        event = {}
-                        
-                        def decode_field(key, value):
-                            if isinstance(value, bytes):
-                                return value.decode('utf-8')
-                            return str(value)
-                        
-                        for key, value in fields.items():
-                            key_str = key.decode('utf-8') if isinstance(key, bytes) else str(key)
-                            val_str = decode_field(key_str, value)
-                            
-                            if key_str in ('payload', 'metadata'):
-                                try:
-                                    event[key_str] = json.loads(val_str)
-                                except json.JSONDecodeError:
-                                    event[key_str] = {}
-                            else:
-                                event[key_str] = val_str
-                        
-                        if 'event_id' not in event:
-                            event['event_id'] = msg_id
-                        if 'session_id' not in event:
-                            event['session_id'] = event.get('external_session_id', '')
-                        
-                        result.append({
-                            'id': msg_id,
-                            'event': event
-                        })
-                        
-                    except Exception as e:
-                        logger.error(f"Failed to parse event from message {msg_id}: {e}")
-                        result.append({
-                            'id': msg_id,
-                            'event': None,
-                            'error': str(e)
-                        })
-
-            return result
-
-        except redis.ConnectionError as e:
-            logger.error(f"Redis connection error: {e}")
-            return []
-        except Exception as e:
-            logger.error(f"Error reading messages: {e}")
-            return []
 
     def stop(self) -> None:
         """Stop the consumer."""
