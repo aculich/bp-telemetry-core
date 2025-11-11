@@ -99,29 +99,41 @@ export class SessionManager {
    * persist to child processes. Hooks will need to read from extension
    * storage or use alternative communication method.
    *
-   * We write to a well-known file location that hooks can read.
+   * We write to workspace-specific session files that hooks can read.
+   * Each workspace gets its own session file to support multiple parallel sessions.
    */
   private setEnvironmentVariables(sessionId: string, workspaceHash: string): void {
     // Store in workspace state for hooks to access
     this.context.workspaceState.update('CURSOR_SESSION_ID', sessionId);
     this.context.workspaceState.update('CURSOR_WORKSPACE_HASH', workspaceHash);
 
-    // Write to home directory file that hooks can reliably read
+    // Write to workspace-specific session file
     const os = require('os');
     const fs = require('fs');
     const path = require('path');
 
-    const envFilePath = path.join(os.homedir(), '.cursor-session-env');
+    // Create session directory if it doesn't exist
+    const sessionDir = path.join(os.homedir(), '.blueplane', 'cursor-session');
+    try {
+      fs.mkdirSync(sessionDir, { recursive: true });
+    } catch (error) {
+      console.error('Failed to create session directory:', error);
+      return;
+    }
+
+    // Write to workspace-specific file (filename is just the hash)
+    const sessionFilePath = path.join(sessionDir, `${workspaceHash}.json`);
 
     const envData = {
       CURSOR_SESSION_ID: sessionId,
       CURSOR_WORKSPACE_HASH: workspaceHash,
+      workspace_path: this.getWorkspacePath(),
       updated_at: new Date().toISOString(),
     };
 
     try {
-      fs.writeFileSync(envFilePath, JSON.stringify(envData, null, 2));
-      console.log(`Session environment written to ${envFilePath}`);
+      fs.writeFileSync(sessionFilePath, JSON.stringify(envData, null, 2));
+      console.log(`Session environment written to ${sessionFilePath}`);
     } catch (error) {
       console.error('Failed to write session environment file:', error);
     }

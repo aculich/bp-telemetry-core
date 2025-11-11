@@ -394,13 +394,32 @@ python scripts/verify_installation.py
    - SQLite schema (raw_traces, conversations)
    - Redis TimeSeries (metrics)
 
+## Recent Updates
+
+### Multi-Session Support (November 11, 2025)
+
+✅ **Implemented workspace-specific session files**
+- Session files now stored in `~/.blueplane/cursor-session/<workspace-hash>.json`
+- Each workspace gets unique session file based on workspace path hash
+- Supports multiple parallel Cursor instances without session ID collision
+- Backward compatible with legacy global file for migration
+
+**Changes:**
+- `sessionManager.ts`: Updated to write workspace-specific session files
+- `hook_base.py`: Updated to read from workspace-specific files with fallback
+
+**Benefits:**
+- Multiple Cursor workspaces can run simultaneously with correct session tracking
+- No more last-write-wins session ID collisions
+- Better isolation between different projects
+
 ## Issues & Limitations
 
 ### Known Limitations
 
 1. **Environment Variables**: VSCode extensions can't directly set process env vars for child processes
    - **Workaround**: Extension writes to file, hooks read from file
-   - **Status**: Implemented in sessionManager.ts
+   - **Status**: ✅ Implemented with workspace-specific files
 
 2. **Cursor Database Location**: Database path varies by platform
    - **Workaround**: Check multiple platform-specific paths

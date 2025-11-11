@@ -100,8 +100,9 @@ class CursorHookBase:
 
         Tries multiple sources in order:
         1. CURSOR_SESSION_ID environment variable
-        2. Extension storage file (~/.cursor-session-env)
-        3. VSCode global storage (platform-specific paths)
+        2. Workspace-specific session file (~/.blueplane/cursor-session/<hash>.json)
+        3. Legacy global file (~/.cursor-session-env)
+        4. VSCode global storage (platform-specific paths)
 
         Returns:
             Session ID or None if not set
@@ -114,8 +115,26 @@ class CursorHookBase:
         # Try reading from extension-written file
         import json
         from pathlib import Path
+        import hashlib
 
-        # Try common locations for the session file
+        # Try workspace-specific session file first
+        # Compute workspace hash from current working directory
+        workspace_path = os.getcwd()
+        workspace_hash = hashlib.sha256(workspace_path.encode()).hexdigest()[:16]
+
+        workspace_session_file = Path.home() / '.blueplane' / 'cursor-session' / f'{workspace_hash}.json'
+        if workspace_session_file.exists():
+            try:
+                with open(workspace_session_file, 'r') as f:
+                    data = json.load(f)
+                    session_id = data.get('CURSOR_SESSION_ID')
+                    if session_id:
+                        return session_id
+            except Exception:
+                # Silent failure - continue to fallback
+                pass
+
+        # Fall back to legacy global file and other locations
         possible_paths = [
             Path.home() / '.cursor-session-env',
             Path.home() / '.vscode' / '.cursor-session-env',
@@ -153,7 +172,24 @@ class CursorHookBase:
         # Try reading from extension file (same as session ID)
         import json
         from pathlib import Path
+        import hashlib
 
+        # Try workspace-specific session file first
+        workspace_path = os.getcwd()
+        computed_hash = hashlib.sha256(workspace_path.encode()).hexdigest()[:16]
+
+        workspace_session_file = Path.home() / '.blueplane' / 'cursor-session' / f'{computed_hash}.json'
+        if workspace_session_file.exists():
+            try:
+                with open(workspace_session_file, 'r') as f:
+                    data = json.load(f)
+                    workspace_hash = data.get('CURSOR_WORKSPACE_HASH')
+                    if workspace_hash:
+                        return workspace_hash
+            except Exception:
+                pass
+
+        # Fall back to legacy global file and other locations
         possible_paths = [
             Path.home() / '.cursor-session-env',
             Path.home() / '.vscode' / '.cursor-session-env',
