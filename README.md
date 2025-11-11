@@ -65,20 +65,28 @@ python scripts/init_database.py
 cd src/capture/cursor
 ./install_global_hooks.sh
 
-# 7. Install and activate Cursor extension (required for database monitoring)
+# 7. Install and activate Cursor extension (required for session management)
 cd extension
 npm install
 npm run compile
 # Then install the VSIX in Cursor via Extensions panel
 
+# Note: The extension handles session management only.
+# Database monitoring is handled by the Python processing server (step 9).
+
 # 8. Configure Cursor for telemetry
 # In Cursor: Open Command Palette (Cmd+Shift+P / Ctrl+Shift+P)
 # Run: "Developer: Set Log Level" → Select "Trace"
-# This enables detailed logging for database monitoring
+# This enables detailed logging (optional, for debugging)
 
 # 9. Start the processing server (in a separate terminal)
 cd ../../..
 python scripts/start_server.py
+
+# The processing server includes:
+# - Fast path consumer (Redis → SQLite)
+# - Database monitor (polls Cursor SQLite databases)
+# - Session monitor (tracks active sessions from Redis)
 
 # 10. Verify installation
 python scripts/verify_installation.py
@@ -172,7 +180,8 @@ python scripts/test_end_to_end.py
 Lightweight telemetry capture that integrates with your IDE:
 
 - **IDE Hooks**: Capture events from Claude Code, Cursor, and other platforms
-- **Database Monitor**: Track database changes for platforms like Cursor
+- **Session Management**: Cursor extension manages session IDs and sends session events
+- **Database Monitor**: Python processing server monitors Cursor's SQLite databases (runs in Layer 2)
 - **Message Queue**: Reliable event delivery to Layer 2
 
 [Learn more →](./docs/architecture/layer1_capture.md)
@@ -240,8 +249,8 @@ Blueplane Telemetry Core is optimized for minimal overhead:
 
 - [x] **Layer 1 capture for Cursor** (✅ Complete)
   - [x] 9 Python hook scripts
-  - [x] TypeScript VSCode extension
-  - [x] Database monitoring
+  - [x] TypeScript VSCode extension (session management)
+  - [x] Database monitoring (Python processing server)
   - [x] Redis Streams message queue
   - [x] Installation scripts
 - [ ] Layer 1 capture for Claude Code
