@@ -10,7 +10,7 @@ Manages batching logic: size-based and time-based flushing.
 
 import time
 import threading
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from collections import deque
 
 import logging
@@ -26,6 +26,7 @@ class BatchManager:
     - Size-based batching (flush when batch_size reached)
     - Time-based batching (flush after timeout)
     - Thread-safe operations
+    - Tracks message IDs alongside events for proper ACK handling
     """
 
     def __init__(self, batch_size: int = 100, batch_timeout: float = 0.1):
@@ -38,49 +39,56 @@ class BatchManager:
         """
         self.batch_size = batch_size
         self.batch_timeout = batch_timeout
-        self._events: deque = deque()
+        # Store (event, message_id) tuples to preserve IDs for ACK
+        self._batch_items: deque = deque()
         self._lock = threading.Lock()
         self._first_event_time: Optional[float] = None
 
-    def add_event(self, event: Dict[str, Any]) -> bool:
+    def add_event(self, event: Dict[str, Any], message_id: str) -> bool:
         """
-        Add event to batch.
+        Add event to batch with its message ID.
 
         Args:
             event: Event dictionary
+            message_id: Redis Stream message ID (required for ACK)
 
         Returns:
             True if batch is ready to flush, False otherwise
         """
         with self._lock:
-            if len(self._events) == 0:
+            if len(self._batch_items) == 0:
                 self._first_event_time = time.time()
 
-            self._events.append(event)
+            self._batch_items.append((event, message_id))
 
             # Check if batch is full
-            if len(self._events) >= self.batch_size:
+            if len(self._batch_items) >= self.batch_size:
                 return True
 
             return False
 
-    def get_batch(self) -> List[Dict[str, Any]]:
+    def get_batch(self) -> Tuple[List[Dict[str, Any]], List[str]]:
         """
         Get current batch and clear it.
 
         Returns:
-            List of events in batch
+            Tuple of (events, message_ids) - both lists in same order
         """
         with self._lock:
-            batch = list(self._events)
-            self._events.clear()
+            events = []
+            message_ids = []
+            for event, message_id in self._batch_items:
+                events.append(event)
+                message_ids.append(message_id)
+            
+            self._batch_items.clear()
             self._first_event_time = None
-            return batch
+            return events, message_ids
 
     def clear(self) -> None:
         """Clear current batch."""
         with self._lock:
-            self._events.clear()
+            self._batch_items.clear()
             self._first_event_time = None
 
     def should_flush(self) -> bool:
@@ -91,7 +99,7 @@ class BatchManager:
             True if timeout exceeded, False otherwise
         """
         with self._lock:
-            if len(self._events) == 0:
+            if len(self._batch_items) == 0:
                 return False
 
             if self._first_event_time is None:
@@ -108,7 +116,7 @@ class BatchManager:
             Number of events in current batch
         """
         with self._lock:
-            return len(self._events)
+            return len(self._batch_items)
 
     def is_empty(self) -> bool:
         """

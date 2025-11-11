@@ -431,49 +431,36 @@ class FastPathConsumer:
                 messages = await self._read_messages_with_count(read_count)
 
                 if messages:
-                    # Track message IDs with events for proper ACK
-                    # Build a map of message ID to event for batch processing
-                    message_event_map = {msg['id']: msg['event'] for msg in messages if msg['event']}
-                    
-                    # Add events to batch
+                    # Add events to batch with their message IDs
                     for msg in messages:
                         if msg['event']:
-                            ready = self.batch_manager.add_event(msg['event'])
+                            ready = self.batch_manager.add_event(msg['event'], msg['id'])
                             if ready:
-                                # Batch is full, prepare for processing
-                                batch = self.batch_manager.get_batch()
+                                # Batch is full, get events and IDs
+                                batch_events, batch_ids = self.batch_manager.get_batch()
                                 
-                                # Reconstruct messages with IDs by matching events
-                                batch_messages = []
-                                for event in batch:
-                                    # Find matching message ID by comparing events
-                                    for msg_id, event_data in message_event_map.items():
-                                        # Simple comparison - in production might want more robust matching
-                                        if event_data == event:
-                                            batch_messages.append({'id': msg_id, 'event': event})
-                                            # Remove from map to avoid duplicates
-                                            del message_event_map[msg_id]
-                                            break
+                                # Reconstruct messages with IDs
+                                batch_messages = [
+                                    {'id': msg_id, 'event': event}
+                                    for event, msg_id in zip(batch_events, batch_ids)
+                                ]
                                 
                                 # Process batch (includes immediate ACK)
                                 await self._process_batch(batch_messages)
-                                batch_messages.clear()
 
                 # Check if timeout-based flush is needed
                 if self.batch_manager.should_flush() and not self.batch_manager.is_empty():
-                    batch = self.batch_manager.get_batch()
-                    if batch:
-                        # For timeout flush, we don't have message IDs
-                        # This is acceptable - messages will be ACKed on next read via PEL
-                        # But we still write them to prevent data loss
-                        try:
-                            sequences = await self.sqlite_writer.write_batch(batch)
-                            # Publish CDC events
-                            for sequence, event in zip(sequences, batch):
-                                self.cdc_publisher.publish(sequence, event)
-                            logger.debug(f"Timeout flush: wrote {len(batch)} events (will ACK on next read)")
-                        except Exception as e:
-                            logger.error(f"Timeout flush failed: {e}")
+                    # Get events and message IDs for timeout flush
+                    batch_events, batch_ids = self.batch_manager.get_batch()
+                    if batch_events:
+                        # Reconstruct messages with IDs for proper ACK
+                        batch_messages = [
+                            {'id': msg_id, 'event': event}
+                            for event, msg_id in zip(batch_events, batch_ids)
+                        ]
+                        
+                        # Process batch (includes immediate ACK)
+                        await self._process_batch(batch_messages)
 
                 # Small sleep to prevent tight loop
                 await asyncio.sleep(0.01)
