@@ -35,8 +35,8 @@ export async function activate(context: vscode.ExtensionContext) {
   }
 
   // Initialize components
-  sessionManager = new SessionManager(context);
   queueWriter = new QueueWriter(config.redisHost, config.redisPort);
+  sessionManager = new SessionManager(context, queueWriter);
   databaseMonitor = new DatabaseMonitor(queueWriter, sessionManager);
 
   // Initialize Redis connection

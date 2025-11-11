@@ -1,34 +1,39 @@
 # Cursor Telemetry Capture
 
-This directory contains the Cursor platform implementation for Blueplane Telemetry Core.
+Layer 1 telemetry capture system for Cursor IDE using global hooks and VSCode extension.
 
-## Components
+## Architecture
 
-### Hooks (`hooks/`)
+### Global Hooks Approach
 
-Python scripts that capture telemetry events from Cursor IDE:
+Cursor doesn't support project-level hooks yet, so we install hooks globally at `~/.cursor/hooks/`:
 
-1. **before_submit_prompt.py** - User prompt submission
-2. **after_agent_response.py** - AI response completion
-3. **before_mcp_execution.py** - Before MCP tool execution
-4. **after_mcp_execution.py** - After MCP tool execution
-5. **after_file_edit.py** - File modifications
-6. **before_shell_execution.py** - Before shell command
-7. **after_shell_execution.py** - After shell command
-8. **before_read_file.py** - Before file read
-9. **stop.py** - Session termination
+- **Global Hooks**: Fire for ALL Cursor workspaces
+- **Extension Events**: Send session start/end events with workspace hash to identify which workspace is active
+- **Workspace-Specific Sessions**: Each workspace gets its own session file with unique session ID
 
-### Extension (`extension/`)
+### How It Works
 
-TypeScript VSCode extension that manages:
-- Session ID generation and environment variables
-- Database monitoring (Cursor's SQLite database)
-- Message queue integration
-
-### Configuration
-
-- **hooks.json** - Cursor hooks configuration file
-- **hook_base.py** - Shared utilities for all hooks
+```
+┌─────────────────────┐
+│  Cursor Workspace   │
+│   (any project)     │
+└──────────┬──────────┘
+           │
+           ├─ Extension activated
+           │  └─> Sends session_start event (workspace_hash, PID)
+           │
+           ├─ User edits file
+           │  └─> Global hook fires (reads workspace session file)
+           │      └─> Sends file_edit event (session_id, workspace_hash, PID)
+           │
+           ├─ User runs command
+           │  └─> Global hook fires
+           │      └─> Sends shell_execution event
+           │
+           └─ Extension deactivated
+              └─> Sends session_end event
+```
 
 ## Installation
 
@@ -38,100 +43,219 @@ TypeScript VSCode extension that manages:
 - Python 3.11+
 - Redis server running (localhost:6379)
 
-### Setup
+### 1. Install Global Hooks
 
-1. **Copy hooks to your project:**
-   ```bash
-   cp -r hooks/ .cursor/hooks/telemetry/
-   cp hooks.json .cursor/hooks.json
-   ```
+```bash
+cd src/capture/cursor
+./install_global_hooks.sh
+```
 
-2. **Install Python dependencies:**
-   ```bash
-   pip install redis pyyaml
-   ```
+This installs hooks to `~/.cursor/hooks/` for all workspaces.
 
-3. **Start Redis server:**
-   ```bash
-   redis-server
-   ```
+### 2. Install Extension
 
-4. **Configure Redis streams:**
-   ```bash
-   redis-cli XGROUP CREATE telemetry:events processors $ MKSTREAM
-   redis-cli XGROUP CREATE cdc:events workers $ MKSTREAM
-   ```
+```bash
+cd extension
+npm install
+npm run compile
+code --install-extension .  # Or install via VSCode Extensions panel
+```
 
-### Extension Installation (Optional)
+### 3. Start Redis
 
-For database monitoring and automatic session management:
+```bash
+redis-server
+```
 
-1. Build the extension:
-   ```bash
-   cd extension
-   npm install
-   npm run compile
-   ```
+### 4. Configure (Optional)
 
-2. Install in Cursor:
-   - Open Cursor
-   - Go to Extensions
-   - Click "Install from VSIX"
-   - Select the compiled `.vsix` file
+Create `~/.blueplane/config.yaml`:
 
-## Usage
+```yaml
+redis:
+  host: localhost
+  port: 6379
 
-Once installed, hooks will automatically capture events as you work in Cursor:
+privacy:
+  opt_out:
+    - code_content
+    - file_paths
 
-- ✅ Prompts and responses are logged
-- ✅ Tool executions are tracked
-- ✅ File edits are recorded
-- ✅ Shell commands are monitored
-- ✅ Session lifecycle is captured
+stream:
+  name: telemetry:events
+  max_length: 10000
+```
 
-All data goes to Redis Streams (`telemetry:events`) for processing by Layer 2.
+## Session Tracking
 
-## Environment Variables
+### Session Files
 
-Hooks require these environment variables (set by extension):
+Each workspace gets a unique session file:
 
-- `CURSOR_SESSION_ID` - Current session identifier
-- `CURSOR_WORKSPACE_HASH` - Hashed workspace path
+```
+~/.blueplane/cursor-session/
+  ├─ a1b2c3d4e5f6g7h8.json  (workspace 1)
+  ├─ 9i8h7g6f5e4d3c2b.json  (workspace 2)
+  └─ ...
+```
+
+Filename is SHA256 hash of workspace path (truncated to 16 chars).
+
+### Session File Format
+
+```json
+{
+  "CURSOR_SESSION_ID": "curs_1731283200000_abc123",
+  "CURSOR_WORKSPACE_HASH": "a1b2c3d4e5f6g7h8",
+  "workspace_path": "/home/user/my-project",
+  "updated_at": "2025-11-11T10:30:00.000Z"
+}
+```
+
+### Session Events
+
+The extension sends session lifecycle events to Redis:
+
+**session_start:**
+```json
+{
+  "hook_type": "session",
+  "event_type": "session_start",
+  "timestamp": "2025-11-11T10:30:00.000Z",
+  "payload": {
+    "workspace_path": "/home/user/my-project",
+    "session_id": "curs_1731283200000_abc123",
+    "workspace_hash": "a1b2c3d4e5f6g7h8"
+  },
+  "metadata": {
+    "pid": 12345,
+    "workspace_hash": "a1b2c3d4e5f6g7h8",
+    "platform": "cursor"
+  }
+}
+```
+
+**session_end:**
+Same format, but `event_type: "session_end"`.
+
+## Hook Scripts
+
+### Available Hooks
+
+All hooks installed to `~/.cursor/hooks/`:
+
+1. **before_submit_prompt.py** - User prompt submission
+2. **after_agent_response.py** - AI response completion
+3. **before_file_edit.py** - Before file modifications
+4. **after_file_edit.py** - After file modifications
+5. **before_read_file.py** - Before file reads
+6. **before_shell_execution.py** - Before shell commands
+7. **after_shell_execution.py** - After shell commands
+8. **before_mcp_execution.py** - Before MCP tool execution
+9. **after_mcp_execution.py** - After MCP tool execution
+
+### Hook Event Format
+
+```json
+{
+  "version": "0.1.0",
+  "hook_type": "afterFileEdit",
+  "event_type": "file_edit",
+  "timestamp": "2025-11-11T10:30:00.000Z",
+  "payload": {
+    "file_path": "<redacted:path>",
+    "operation": "edit"
+  },
+  "metadata": {
+    "pid": 12345,
+    "workspace_hash": "a1b2c3d4e5f6g7h8"
+  }
+}
+```
+
+## Event Flow
+
+```
+Extension Start → session_start event → Redis
+     ↓
+Hook Fires → Reads session file → Sends event → Redis
+     ↓
+Extension Stop → session_end event → Redis
+```
 
 ## Privacy
 
-Hooks follow strict privacy guidelines:
+All hooks respect privacy settings from `~/.blueplane/config.yaml`:
 
-- ❌ No code content captured
-- ❌ No file paths stored (only extensions)
-- ❌ No prompt text content
-- ✅ Only metadata and metrics
+- **Code content**: Never captured by default
+- **File paths**: Hashed if `file_paths` opt-out enabled
+- **Error messages**: Redacted to error type only
+- **Environment vars**: Never logged
 
 See `config/privacy.yaml` for full privacy settings.
 
+## Debugging
+
+### Check Hook Installation
+
+```bash
+ls -la ~/.cursor/hooks/
+```
+
+Should show all 9 hook scripts + `hook_base.py` + `shared/` directory.
+
+### Check Session File
+
+```bash
+cat ~/.blueplane/cursor-session/*.json
+```
+
+Should show session info for each workspace.
+
+### Monitor Redis Events
+
+```bash
+redis-cli XREAD COUNT 10 STREAMS telemetry:events 0
+```
+
+### Extension Logs
+
+View in VSCode:
+- `View` → `Output` → Select "Blueplane Telemetry"
+
+## Multiple Workspaces
+
+The global hooks approach supports multiple Cursor workspaces simultaneously:
+
+1. Each workspace gets unique session file (workspace hash)
+2. Each workspace has unique session ID
+3. Extension sends session events with workspace hash
+4. Hooks read workspace-specific session file based on current directory
+5. All events tagged with workspace_hash and PID
+
+## Uninstallation
+
+```bash
+rm -rf ~/.cursor/hooks
+rm -rf ~/.blueplane/cursor-session
+```
+
 ## Troubleshooting
 
-### Hooks not firing
+**Hooks not firing:**
+- Check hooks are in `~/.cursor/hooks/` and executable
+- Check Redis is running: `redis-cli ping`
+- Check extension is activated in VSCode
 
-1. Check hooks.json is in `.cursor/` directory
-2. Verify hooks are executable: `chmod +x hooks/*.py`
-3. Check Redis is running: `redis-cli PING`
+**Wrong session ID:**
+- Check session file for current workspace
+- Verify workspace hash matches current directory hash
+- Restart extension to create new session
 
-### Events not appearing in queue
-
-1. Check Redis connection: `redis-cli XLEN telemetry:events`
-2. View hook logs: `.cursor/hooks.log`
-3. Test hook manually:
-   ```bash
-   export CURSOR_SESSION_ID=test-session
-   python hooks/before_submit_prompt.py --workspace-root /tmp --generation-id test-123 --prompt-length 100
-   ```
-
-### Redis connection errors
-
-1. Ensure Redis is running: `redis-server`
-2. Check port 6379 is open
-3. Verify config: `config/redis.yaml`
+**Events not appearing in Redis:**
+- Check Redis connection in extension logs
+- Verify config.yaml has correct Redis host/port
+- Check for errors in hook execution (silent failures)
 
 ## Development
 
@@ -143,7 +267,8 @@ Test individual hooks:
 export CURSOR_SESSION_ID=test-session-123
 export CURSOR_WORKSPACE_HASH=abc123def456
 
-python hooks/before_submit_prompt.py \
+cd /path/to/workspace
+~/.cursor/hooks/before_submit_prompt.py \
   --workspace-root /path/to/workspace \
   --generation-id gen-456 \
   --prompt-length 150
@@ -161,7 +286,7 @@ redis-cli XREAD COUNT 1 STREAMS telemetry:events 0-0
 1. Create new hook script in `hooks/`
 2. Extend `CursorHookBase` class
 3. Implement `execute()` method
-4. Add to `hooks.json` configuration
+4. Update `install_global_hooks.sh` to copy new hook
 5. Make executable: `chmod +x hooks/your_hook.py`
 
 ## Architecture
@@ -170,3 +295,13 @@ See main documentation:
 - [Layer 1 Capture](../../../docs/architecture/layer1_capture.md)
 - [Database Architecture](../../../docs/architecture/layer2_db_architecture.md)
 - [Overall Architecture](../../../docs/ARCHITECTURE.md)
+
+## Next Steps
+
+After installation, Layer 2 (Processing) will:
+1. Read events from Redis Streams
+2. Process and enrich events
+3. Store in DuckDB (raw traces) and SQLite (conversations)
+4. Derive metrics and update Redis TimeSeries
+
+See `docs/architecture/layer2_async_pipeline.md` for details.

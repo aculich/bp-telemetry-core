@@ -12,11 +12,15 @@
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import { SessionInfo } from './types';
+import { QueueWriter } from './queueWriter';
 
 export class SessionManager {
   private currentSession: SessionInfo | null = null;
 
-  constructor(private context: vscode.ExtensionContext) {}
+  constructor(
+    private context: vscode.ExtensionContext,
+    private queueWriter?: QueueWriter
+  ) {}
 
   /**
    * Start a new session
@@ -39,6 +43,9 @@ export class SessionManager {
     // Store in extension context
     this.context.workspaceState.update('currentSession', this.currentSession);
 
+    // Send session start event to Redis
+    this.sendSessionEvent('start', sessionId, workspaceHash, workspacePath);
+
     console.log(`Started new Blueplane session: ${sessionId}`);
 
     return this.currentSession;
@@ -49,6 +56,14 @@ export class SessionManager {
    */
   stopSession(): void {
     if (this.currentSession) {
+      // Send session end event to Redis
+      this.sendSessionEvent(
+        'end',
+        this.currentSession.sessionId,
+        this.currentSession.workspaceHash,
+        this.getWorkspacePath()
+      );
+
       console.log(`Stopped Blueplane session: ${this.currentSession.sessionId}`);
       this.currentSession = null;
       this.context.workspaceState.update('currentSession', null);
@@ -156,6 +171,45 @@ export class SessionManager {
       `Duration: ${durationStr}\n` +
       `Workspace: ${this.currentSession.workspaceHash}`
     );
+  }
+
+  /**
+   * Send session event to Redis
+   */
+  private sendSessionEvent(
+    eventType: 'start' | 'end',
+    sessionId: string,
+    workspaceHash: string,
+    workspacePath: string
+  ): void {
+    if (!this.queueWriter || !this.queueWriter.isConnected()) {
+      console.debug('QueueWriter not available, skipping session event');
+      return;
+    }
+
+    // Build session event
+    const event = {
+      hookType: 'session',
+      eventType: `session_${eventType}`,
+      timestamp: new Date().toISOString(),
+      payload: {
+        workspace_path: workspacePath,
+        session_id: sessionId,
+        workspace_hash: workspaceHash,
+      },
+      metadata: {
+        pid: process.pid,
+        workspace_hash: workspaceHash,
+        platform: 'cursor',
+      },
+    };
+
+    // Send to Redis (fire and forget)
+    this.queueWriter.enqueue(event, 'cursor', sessionId).catch((error) => {
+      console.error(`Failed to send session ${eventType} event:`, error);
+    });
+
+    console.log(`Session ${eventType} event sent for ${sessionId}`);
   }
 
   /**

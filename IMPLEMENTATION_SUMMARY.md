@@ -396,6 +396,42 @@ python scripts/verify_installation.py
 
 ## Recent Updates
 
+### Global Hooks Refactoring (November 11, 2025)
+
+✅ **Refactored to use global `~/.cursor/hooks/` instead of project-level hooks**
+- Hooks installed once at global level (Cursor doesn't support project hooks yet)
+- Extension sends session start/end events to Redis with workspace hash and PID
+- Global hooks work for all workspaces, extension events track which workspace is active
+
+**Changes:**
+- `install_global_hooks.sh`: New installation script for global hooks
+- `sessionManager.ts`: Now sends session_start/session_end events to Redis
+- `extension.ts`: Updated to pass QueueWriter to SessionManager
+- `send_session_event.py`: Python script for manual session events (optional)
+
+**Benefits:**
+- Simpler installation (install hooks once globally)
+- Extension explicitly tracks session lifecycle with events
+- PID tracking helps distinguish between multiple Cursor instances
+- Workspace hash in events enables per-workspace analytics
+
+**Installation:**
+```bash
+cd src/capture/cursor
+./install_global_hooks.sh
+```
+
+### PID Tracking (November 11, 2025)
+
+✅ **All hook events now include process ID**
+- `hook_base.py`: Automatically adds PID to event metadata
+- Session events from extension also include PID
+
+**Benefits:**
+- Correlate events by process instance
+- Debug which Cursor window generated which event
+- Support parallel session analysis
+
 ### Multi-Session Support (November 11, 2025)
 
 ✅ **Implemented workspace-specific session files**
