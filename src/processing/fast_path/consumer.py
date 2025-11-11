@@ -10,7 +10,6 @@ and publishes CDC events for slow path workers.
 """
 
 import json
-import asyncio
 import logging
 import time
 from typing import Dict, List, Any, Optional, Set
@@ -26,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 class FastPathConsumer:
     """
-    High-throughput consumer that writes raw events with zero blocking.
+    High-throughput consumer that writes raw events.
     
     Target: <10ms per batch at P95.
     
@@ -86,7 +85,7 @@ class FastPathConsumer:
         self.write_times = deque(maxlen=100)  # Track write latencies for backpressure
         self.pending_retry_idle_ms = max(int(batch_timeout * 1000), 100)
 
-    async def _ensure_consumer_group(self) -> None:
+    def _ensure_consumer_group(self) -> None:
         """Ensure consumer group exists, create if not."""
         try:
             self.redis_client.xgroup_create(
@@ -137,23 +136,12 @@ class FastPathConsumer:
             if "session_id" not in event:
                 event["session_id"] = event.get("external_session_id", "")
 
-            # Enhanced logging for database_trace events
-            event_type = event.get("event_type", "")
-            if event_type == "database_trace":
-                metadata = event.get("metadata", {})
-                workspace_hash = metadata.get("workspace_hash") if isinstance(metadata, dict) else None
-                logger.info(
-                    f"Decoded database_trace event: msg_id={message_id[:20]}..., "
-                    f"event_type={event_type}, workspace_hash={workspace_hash}, "
-                    f"session_id={event.get('session_id', '')[:20]}..."
-                )
-
             return event
         except Exception as exc:
             logger.error(f"Failed to parse event from message {message_id}: {exc}")
             return None
 
-    async def _read_messages(self) -> List[Dict[str, Any]]:
+    def _read_messages(self) -> List[Dict[str, Any]]:
         """
         Read messages from Redis Streams using XREADGROUP.
 
@@ -162,7 +150,6 @@ class FastPathConsumer:
         """
         try:
             # Read from stream with consumer group
-            # Use current_batch_size for adaptive batching
             messages = self.redis_client.xreadgroup(
                 self.consumer_group,
                 self.consumer_name,
@@ -195,7 +182,7 @@ class FastPathConsumer:
             logger.error(f"Error reading messages: {e}")
             return []
 
-    async def _process_batch(self, messages: List[Dict[str, Any]]) -> List[str]:
+    def _process_batch(self, messages: List[Dict[str, Any]]) -> List[str]:
         """
         Process batch of messages: write to SQLite and publish CDC events.
         
@@ -213,83 +200,47 @@ class FastPathConsumer:
         # Extract events (skip None events from parse errors)
         events = []
         valid_message_ids = []
-        db_trace_events = []
         
         for msg in messages:
             if msg['event'] is not None:
                 event = msg['event']
                 events.append(event)
                 valid_message_ids.append(msg['id'])
-                
-                # Track database_trace events for detailed logging
-                if event.get('event_type') == 'database_trace':
-                    metadata = event.get('metadata', {})
-                    workspace_hash = metadata.get('workspace_hash') if isinstance(metadata, dict) else None
-                    db_trace_events.append({
-                        'msg_id': msg['id'],
-                        'workspace_hash': workspace_hash,
-                        'session_id': event.get('session_id', ''),
-                    })
             else:
                 # Invalid event - send to DLQ immediately
                 logger.warning(f"Invalid event (None) for message {msg['id']}, sending to DLQ")
-                await self._handle_failed_message(msg['id'], msg.get('event'), retry_count=self.max_retries)
+                self._handle_failed_message(msg['id'], msg.get('event'), retry_count=self.max_retries)
 
         if not events:
             logger.debug("No valid events to process in batch")
             return []
 
-        # Log database_trace events being processed
-        if db_trace_events:
-            workspace_hashes = [e['workspace_hash'] for e in db_trace_events[:5]]
-            logger.info(
-                f"Processing batch with {len(db_trace_events)} database_trace events: "
-                f"{', '.join([f'wh={wh}' for wh in workspace_hashes])}"
-            )
-
         try:
-            # Write to SQLite (runs in thread pool, non-blocking)
+            # Write to SQLite (synchronous)
             start_time = time.time()
-            sequences = await self.sqlite_writer.write_batch(events)
+            sequences = self.sqlite_writer.write_batch_sync(events)
             write_duration = time.time() - start_time
             
             # Track write latency for backpressure
             self.write_times.append(write_duration)
             
-            # Enhanced logging for database_trace events
-            if db_trace_events and sequences:
-                db_trace_sequences = [
-                    seq for seq, event in zip(sequences, events)
-                    if event.get('event_type') == 'database_trace'
-                ]
-                logger.info(
-                    f"Successfully wrote {len(db_trace_sequences)} database_trace events: "
-                    f"sequences {db_trace_sequences[:5] if db_trace_sequences else 'none'}"
-                )
-            
-            # Publish CDC events (fire-and-forget, synchronous call)
+            # Publish CDC events
             for sequence, event in zip(sequences, events):
                 self.cdc_publisher.publish(sequence, event)
 
             logger.debug(f"Processed batch: {len(events)} events, sequences {sequences[0]}-{sequences[-1]}, duration: {write_duration:.3f}s")
             
             # ACK messages immediately after successful write
-            # This prevents message loss if consumer crashes
-            await self._ack_messages(valid_message_ids)
+            self._ack_messages(valid_message_ids)
             
             return valid_message_ids
 
         except Exception as e:
             logger.error(f"Failed to process batch: {e}", exc_info=True)
-            if db_trace_events:
-                logger.error(
-                    f"Failed batch included {len(db_trace_events)} database_trace events: "
-                    f"{', '.join([e['msg_id'][:20] for e in db_trace_events[:3]])}"
-                )
             # Don't ACK messages - they'll retry via PEL
             return []
 
-    async def _ack_messages(self, message_ids: List[str]) -> None:
+    def _ack_messages(self, message_ids: List[str]) -> None:
         """
         Acknowledge processed messages.
 
@@ -308,7 +259,7 @@ class FastPathConsumer:
         except Exception as e:
             logger.error(f"Failed to ACK messages: {e}")
 
-    async def _handle_failed_message(self, message_id: str, event: Optional[Dict], retry_count: int) -> None:
+    def _handle_failed_message(self, message_id: str, event: Optional[Dict], retry_count: int) -> None:
         """
         Handle failed message: send to DLQ if max retries exceeded.
 
@@ -394,7 +345,7 @@ class FastPathConsumer:
         
         return False
 
-    async def _process_pending_messages(self) -> None:
+    def _process_pending_messages(self) -> None:
         """Process pending messages from PEL (retry failed messages)."""
         try:
             # Get pending messages for this consumer
@@ -428,6 +379,10 @@ class FastPathConsumer:
                 elif idle_time_ms >= self.pending_retry_idle_ms:
                     retry_ids.append(msg_id_str)
 
+            # Limit retry processing to avoid blocking - process max 10 at a time
+            if retry_ids:
+                retry_ids = retry_ids[:10]  # Process max 10 pending messages per iteration
+
             # First, move messages that exceeded retry limit to DLQ
             if dlq_candidates:
                 try:
@@ -447,7 +402,7 @@ class FastPathConsumer:
                     event = self._decode_stream_message(msg_id_str, fields)
                     retry_count = dlq_candidates.get(msg_id_str, self.max_retries)
 
-                    await self._handle_failed_message(msg_id_str, event, retry_count=retry_count)
+                    self._handle_failed_message(msg_id_str, event, retry_count=retry_count)
 
                     try:
                         self.redis_client.xack(self.stream_name, self.consumer_group, msg_id_str)
@@ -479,7 +434,7 @@ class FastPathConsumer:
 
                         if event is None:
                             # Unparseable event - send to DLQ immediately
-                            await self._handle_failed_message(msg_id_str, event, retry_count=self.max_retries)
+                            self._handle_failed_message(msg_id_str, event, retry_count=self.max_retries)
                             try:
                                 self.redis_client.xack(self.stream_name, self.consumer_group, msg_id_str)
                             except Exception as ack_error:
@@ -490,7 +445,7 @@ class FastPathConsumer:
                         messages.append({'id': msg_id_str, 'event': event})
 
                     if messages:
-                        processed_ids = await self._process_batch(messages)
+                        processed_ids = self._process_batch(messages)
                         if processed_ids:
                             self.batch_manager.remove_message_ids(processed_ids)
                             logger.debug(f"Processed {len(processed_ids)} pending messages")
@@ -498,7 +453,7 @@ class FastPathConsumer:
         except Exception as e:
             logger.error(f"Error processing pending messages: {e}")
 
-    async def run(self) -> None:
+    def run(self) -> None:
         """
         Main consumer loop.
 
@@ -506,31 +461,34 @@ class FastPathConsumer:
         writes to SQLite, and publishes CDC events.
         
         Features:
-        - Non-blocking SQLite writes (via thread pool)
+        - Synchronous SQLite writes
         - Immediate ACK after successful write (prevents message loss)
         - Backpressure handling (adaptive batch sizing, read throttling)
         """
         self.running = True
-        await self._ensure_consumer_group()
+        self._ensure_consumer_group()
 
         logger.info(f"Fast path consumer started: {self.consumer_name}")
 
+        iteration = 0
         while self.running:
             try:
+                iteration += 1
+                
                 # Process pending messages first (retries)
-                await self._process_pending_messages()
+                self._process_pending_messages()
 
                 # Adjust batch size based on write latency (backpressure)
                 self._adjust_batch_size()
 
                 # Throttle reads if we have too many pending batches
                 if self._should_throttle_reads():
-                    logger.debug(f"Throttling reads due to backpressure")
-                    await asyncio.sleep(0.1)  # Wait for writes to catch up
+                    logger.debug("Throttling reads due to backpressure")
+                    time.sleep(0.1)
                     continue
 
-                # Read new messages (adaptive batch size already set in _adjust_batch_size)
-                messages = await self._read_messages()
+                # Read new messages
+                messages = self._read_messages()
 
                 if messages:
                     # Add events to batch with their message IDs
@@ -548,77 +506,35 @@ class FastPathConsumer:
                                 ]
                                 
                                 # Process batch (includes immediate ACK)
-                                await self._process_batch(batch_messages)
+                                processed_ids = self._process_batch(batch_messages)
+                                if not processed_ids:
+                                    logger.warning(f"Batch processing failed for {len(batch_messages)} messages")
 
                 # Check if timeout-based flush is needed
                 if self.batch_manager.should_flush() and not self.batch_manager.is_empty():
-                    # Get events and message IDs for timeout flush
                     batch_events, batch_ids = self.batch_manager.get_batch()
                     if batch_events:
-                        # Reconstruct messages with IDs for proper ACK
                         batch_messages = [
                             {'id': msg_id, 'event': event}
                             for event, msg_id in zip(batch_events, batch_ids)
                         ]
                         
-                        # Process batch (includes immediate ACK)
-                        await self._process_batch(batch_messages)
+                        processed_ids = self._process_batch(batch_messages)
+                        if processed_ids:
+                            self.batch_manager.remove_message_ids(processed_ids)
 
                 # Small sleep to prevent tight loop
-                await asyncio.sleep(0.01)
+                time.sleep(0.01)
 
-            except asyncio.CancelledError:
-                logger.info("Consumer cancelled")
+            except KeyboardInterrupt:
+                logger.info("Consumer interrupted")
                 break
             except Exception as e:
-                logger.error(f"Error in consumer loop: {e}")
-                await asyncio.sleep(1)  # Back off on error
+                logger.error(f"Error in consumer loop: {e}", exc_info=True)
+                time.sleep(1)  # Back off on error
 
         logger.info("Fast path consumer stopped")
-
-    async def _read_messages_with_count(self, count: int) -> List[Dict[str, Any]]:
-        """
-        Read messages with specified count (for backpressure handling).
-        
-        Args:
-            count: Maximum number of messages to read
-            
-        Returns:
-            List of message dictionaries
-        """
-        try:
-            messages = self.redis_client.xreadgroup(
-                self.consumer_group,
-                self.consumer_name,
-                {self.stream_name: ">"},
-                count=count,
-                block=self.block_ms
-            )
-
-            if not messages:
-                return []
-
-            # Parse messages (same logic as _read_messages)
-            result = []
-            for stream_name, stream_messages in messages:
-                for message_id, fields in stream_messages:
-                    msg_id = message_id.decode('utf-8') if isinstance(message_id, bytes) else str(message_id)
-                    event = self._decode_stream_message(msg_id, fields)
-                    result.append({
-                        'id': msg_id,
-                        'event': event
-                    })
-
-            return result
-
-        except redis.ConnectionError as e:
-            logger.error(f"Redis connection error: {e}")
-            return []
-        except Exception as e:
-            logger.error(f"Error reading messages: {e}")
-            return []
 
     def stop(self) -> None:
         """Stop the consumer."""
         self.running = False
-
