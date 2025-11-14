@@ -58,15 +58,18 @@
     "lint": "eslint src --ext ts",
     "test": "node ./out/test/runTest.js"
   },
+  "dependencies": {
+    "redis": "^5.0.0",
+    "better-sqlite3": "^11.0.0",
+    "chokidar": "^3.6.0"
+  },
   "devDependencies": {
     "@types/node": "^18.0.0",
     "@types/vscode": "^1.80.0",
     "@typescript-eslint/eslint-plugin": "^5.60.0",
     "@typescript-eslint/parser": "^5.60.0",
     "eslint": "^8.43.0",
-    "typescript": "^5.1.0"
-  },
-  "dependencies": {
-    "redis": "^5.0.0"
+    "typescript": "^5.1.0",
+    "@types/better-sqlite3": "^7.6.0"
   }
 }
