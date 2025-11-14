@@ -79,11 +79,11 @@ class CursorDatabaseMonitor:
         """Start database monitoring."""
         self.running = True
 
-        # Start monitoring loop
-        asyncio.create_task(self._monitor_loop())
+        # Start monitoring loop and store task references
+        self._monitor_task = asyncio.create_task(self._monitor_loop())
 
         # Start deduplication cleanup
-        asyncio.create_task(self._cleanup_dedup_cache())
+        self._cleanup_task = asyncio.create_task(self._cleanup_dedup_cache())
 
         logger.info("Database monitor started")
         
@@ -94,6 +94,21 @@ class CursorDatabaseMonitor:
     async def stop(self):
         """Stop database monitoring."""
         self.running = False
+
+        # Cancel monitoring tasks
+        if hasattr(self, '_monitor_task') and self._monitor_task:
+            self._monitor_task.cancel()
+            try:
+                await self._monitor_task
+            except asyncio.CancelledError:
+                pass
+
+        if hasattr(self, '_cleanup_task') and self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
 
         # Close all connections
         for conn in self.db_connections.values():
@@ -107,23 +122,30 @@ class CursorDatabaseMonitor:
 
     async def _monitor_loop(self):
         """Main monitoring loop."""
-        while self.running:
-            try:
-                # Get active workspaces
-                active_workspaces = self.session_monitor.get_active_workspaces()
+        try:
+            while self.running:
+                try:
+                    # Get active workspaces
+                    active_workspaces = self.session_monitor.get_active_workspaces()
 
-                # Monitor each active workspace
-                for workspace_hash, session_info in active_workspaces.items():
-                    await self._monitor_workspace(workspace_hash, session_info)
+                    # Monitor each active workspace
+                    for workspace_hash, session_info in active_workspaces.items():
+                        await self._monitor_workspace(workspace_hash, session_info)
 
-                # Clean up inactive workspaces
-                await self._cleanup_inactive_workspaces(active_workspaces.keys())
+                    # Clean up inactive workspaces
+                    await self._cleanup_inactive_workspaces(active_workspaces.keys())
 
-                await asyncio.sleep(self.poll_interval)
+                    await asyncio.sleep(self.poll_interval)
 
-            except Exception as e:
-                logger.error(f"Error in monitor loop: {e}")
-                await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    logger.debug("Monitor loop cancelled")
+                    raise
+                except Exception as e:
+                    logger.error(f"Error in monitor loop: {e}")
+                    await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            logger.debug("Monitor loop task cancelled")
+            raise
 
     async def _monitor_workspace(self, workspace_hash: str, session_info: dict):
         """Monitor a specific workspace."""
@@ -489,21 +511,25 @@ class CursorDatabaseMonitor:
 
     async def _cleanup_dedup_cache(self):
         """Clean up old deduplication cache entries."""
-        while self.running:
-            await asyncio.sleep(3600)  # Every hour
+        try:
+            while self.running:
+                await asyncio.sleep(3600)  # Every hour
+                
+                cutoff_time = time.time() - (self.dedup_window_hours * 3600)
+                to_remove = [
+                    key for key, ttl in self.generation_ttl.items()
+                    if ttl < cutoff_time
+                ]
 
-            cutoff_time = time.time() - (self.dedup_window_hours * 3600)
-            to_remove = [
-                key for key, ttl in self.generation_ttl.items()
-                if ttl < cutoff_time
-            ]
+                for key in to_remove:
+                    self.seen_generations.discard(key)
+                    del self.generation_ttl[key]
 
-            for key in to_remove:
-                self.seen_generations.discard(key)
-                del self.generation_ttl[key]
-
-            if to_remove:
-                logger.debug(f"Cleaned up {len(to_remove)} deduplication entries")
+                if to_remove:
+                    logger.debug(f"Cleaned up {len(to_remove)} deduplication entries")
+        except asyncio.CancelledError:
+            logger.debug("Cleanup task cancelled")
+            raise
 
     async def _cleanup_inactive_workspaces(self, active_hashes: set):
         """Clean up resources for inactive workspaces."""

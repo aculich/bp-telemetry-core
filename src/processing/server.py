@@ -258,25 +258,42 @@ async def main() -> None:
 
     # Create server
     server = TelemetryServer()
+    shutdown_event = asyncio.Event()
 
     # Setup signal handlers for graceful shutdown
     def signal_handler(sig, frame):
         logger.info("Received shutdown signal")
-        asyncio.create_task(server.stop())
-        sys.exit(0)
+        shutdown_event.set()
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
     try:
-        await server.start()
+        # Start server in background task
+        server_task = asyncio.create_task(server.start())
+        
+        # Wait for shutdown signal
+        await shutdown_event.wait()
+        
+        logger.info("Shutdown signal received, stopping server...")
+        
+        # Cancel the server task and wait for graceful shutdown
+        server_task.cancel()
+        try:
+            await server_task
+        except asyncio.CancelledError:
+            pass
+        
+        # Stop server gracefully
+        await server.stop()
+        
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
-    except Exception as e:
-        logger.error(f"Server error: {e}")
-        sys.exit(1)
-    finally:
         await server.stop()
+    except Exception as e:
+        logger.error(f"Server error: {e}", exc_info=True)
+        await server.stop()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

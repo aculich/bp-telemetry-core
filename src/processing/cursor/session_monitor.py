@@ -44,8 +44,8 @@ class SessionMonitor:
         # Process historical events first (catch up on existing sessions)
         await self._catch_up_historical_events()
 
-        # Start Redis event listener
-        asyncio.create_task(self._listen_redis_events())
+        # Start Redis event listener and store task reference
+        self._listen_task = asyncio.create_task(self._listen_redis_events())
 
         logger.info("Session monitor started (Redis events only)")
 
@@ -72,6 +72,15 @@ class SessionMonitor:
     async def stop(self):
         """Stop monitoring."""
         self.running = False
+        
+        # Cancel the listen task if it exists
+        if hasattr(self, '_listen_task') and self._listen_task:
+            self._listen_task.cancel()
+            try:
+                await self._listen_task
+            except asyncio.CancelledError:
+                pass
+        
         logger.info("Session monitor stopped")
 
     async def _listen_redis_events(self):
@@ -100,6 +109,9 @@ class SessionMonitor:
                             await self._process_redis_message(msg_id, fields)
                             self.last_redis_id = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
 
+                except asyncio.CancelledError:
+                    logger.debug("Session monitor listener cancelled")
+                    raise
                 except redis.ConnectionError:
                     logger.warning("Redis connection lost, retrying...")
                     await asyncio.sleep(5)
@@ -107,6 +119,9 @@ class SessionMonitor:
                     logger.error(f"Error reading Redis events: {e}")
                     await asyncio.sleep(1)
 
+        except asyncio.CancelledError:
+            logger.debug("Session monitor listener task cancelled")
+            raise
         except Exception as e:
             logger.error(f"Redis event listener failed: {e}")
 
