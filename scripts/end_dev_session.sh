@@ -53,12 +53,22 @@ if [[ "$CURRENT_BRANCH" == "main" ]]; then
 fi
 
 if [[ "$CURRENT_BRANCH" == "develop" ]]; then
-    echo "   ⚠️  Warning: You're on develop branch."
-    read -p "   Continue with develop? (y/N): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "   Aborted."
-        exit 0
+    # Check if develop has uncommitted changes or unpushed commits
+    HAS_UNCOMMITTED=$(git diff-index --quiet HEAD --; echo $?)
+    LOCAL_COMMITS=$(git rev-list --count origin/develop..HEAD 2>/dev/null || echo "0")
+    
+    if [[ "$HAS_UNCOMMITTED" -eq 1 ]] || [[ "$LOCAL_COMMITS" -gt 0 ]]; then
+        # There's work to save, so it makes sense to continue
+        echo "   ℹ️  On develop branch with work to save. Continuing..."
+    else
+        # No work to save, probably accidental - ask
+        echo "   ⚠️  Warning: You're on develop branch with no uncommitted changes or unpushed commits."
+        read -p "   Continue anyway? (y/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "   Aborted."
+            exit 0
+        fi
     fi
 fi
 
@@ -70,20 +80,36 @@ if ! git diff-index --quiet HEAD --; then
     git status --short
     
     if [[ "$SKIP_COMMIT" == "false" ]]; then
-        read -p "   Commit these changes? (Y/n): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-            echo "   📝 Enter commit message (or press Enter for default):"
-            read -r COMMIT_MSG
-            if [[ -z "$COMMIT_MSG" ]]; then
-                COMMIT_MSG="WIP: $(date +%Y-%m-%d-%H%M%S)"
+        # Check if changes look like they should be committed
+        # Skip commit if all files are in .gitignore or are temporary files
+        CHANGED_FILES=$(git status --short | awk '{print $2}')
+        ALL_IGNORED=true
+        for file in $CHANGED_FILES; do
+            if ! git check-ignore -q "$file"; then
+                ALL_IGNORED=false
+                break
             fi
-            
-            git add -A
-            git commit -m "$COMMIT_MSG"
-            echo "   ✅ Changes committed"
+        done
+        
+        if [[ "$ALL_IGNORED" == "true" ]]; then
+            echo "   ℹ️  All changed files are ignored. Skipping commit."
         else
-            echo "   ⚠️  Skipping commit. Changes remain uncommitted."
+            # Auto-commit by default (Y), but allow override
+            read -p "   Commit these changes? (Y/n): " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+                echo "   📝 Enter commit message (or press Enter for default):"
+                read -r COMMIT_MSG
+                if [[ -z "$COMMIT_MSG" ]]; then
+                    COMMIT_MSG="WIP: $(date +%Y-%m-%d-%H%M%S)"
+                fi
+                
+                git add -A
+                git commit -m "$COMMIT_MSG"
+                echo "   ✅ Changes committed"
+            else
+                echo "   ⚠️  Skipping commit. Changes remain uncommitted."
+            fi
         fi
     else
         echo "   ⚠️  Skipping commit (--no-commit flag)"
@@ -101,12 +127,21 @@ HAS_REMOTE=$(git ls-remote --heads origin "$CURRENT_BRANCH" | wc -l)
 if [[ "$LOCAL_COMMITS" -gt 0 ]]; then
     echo "   📤 Branch has $LOCAL_COMMITS local commit(s) not pushed"
     
+    # Auto-push by default (most common case)
     if [[ "$AUTO_PUSH" == "true" ]]; then
         PUSH_ANSWER="y"
     else
-        read -p "   Push to origin? (Y/n): " -n 1 -r
-        echo
-        PUSH_ANSWER="$REPLY"
+        # Check if we can push (network available, etc.)
+        if git ls-remote --heads origin >/dev/null 2>&1; then
+            # Remote is accessible, auto-push
+            echo "   📤 Pushing to origin (auto)..."
+            PUSH_ANSWER="y"
+        else
+            # Remote not accessible, ask
+            read -p "   Push to origin? (Y/n): " -n 1 -r
+            echo
+            PUSH_ANSWER="$REPLY"
+        fi
     fi
     
     if [[ ! "$PUSH_ANSWER" =~ ^[Nn]$ ]]; then
@@ -122,12 +157,19 @@ if [[ "$LOCAL_COMMITS" -gt 0 ]]; then
 elif [[ "$HAS_REMOTE" -eq 0 ]]; then
     echo "   📤 Branch doesn't exist on remote"
     
+    # Auto-push new branches by default
     if [[ "$AUTO_PUSH" == "true" ]]; then
         PUSH_ANSWER="y"
     else
-        read -p "   Push to origin? (Y/n): " -n 1 -r
-        echo
-        PUSH_ANSWER="$REPLY"
+        # Check if remote is accessible
+        if git ls-remote --heads origin >/dev/null 2>&1; then
+            echo "   📤 Pushing to origin (auto)..."
+            PUSH_ANSWER="y"
+        else
+            read -p "   Push to origin? (Y/n): " -n 1 -r
+            echo
+            PUSH_ANSWER="$REPLY"
+        fi
     fi
     
     if [[ ! "$PUSH_ANSWER" =~ ^[Nn]$ ]]; then
@@ -149,11 +191,36 @@ echo ""
 
 # Step 5: Optional - switch back to develop
 echo "📋 Step 4: Cleanup"
-read -p "   Switch back to develop branch? (y/N): " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    git checkout develop
-    echo "   ✅ Switched to develop branch"
+
+# Auto-switch to develop if:
+# 1. We're on a feature branch (not develop/main)
+# 2. All work is committed and pushed
+# 3. No uncommitted changes
+
+if [[ "$CURRENT_BRANCH" =~ ^feature/ ]] && git diff-index --quiet HEAD --; then
+    # Check if branch is pushed
+    if git rev-parse --verify "origin/$CURRENT_BRANCH" >/dev/null 2>&1 || \
+       [[ "$LOCAL_COMMITS" -eq 0 ]] || [[ "$AUTO_PUSH" == "true" ]]; then
+        echo "   🔄 Switching back to develop (auto)..."
+        git checkout develop
+        echo "   ✅ Switched to develop branch"
+    else
+        # Branch not pushed, ask
+        read -p "   Switch back to develop branch? (Y/n): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            git checkout develop
+            echo "   ✅ Switched to develop branch"
+        fi
+    fi
+else
+    # On develop or has uncommitted changes - ask
+    read -p "   Switch back to develop branch? (Y/n): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+        git checkout develop
+        echo "   ✅ Switched to develop branch"
+    fi
 fi
 
 echo ""

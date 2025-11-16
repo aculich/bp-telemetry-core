@@ -66,16 +66,40 @@ fi
 
 # Sync main with upstream (dry-run first to show what will happen)
 echo "   Checking upstream sync status..."
-if ./scripts/sync_upstream.sh --dry-run 2>&1 | grep -q "Already in sync"; then
+SYNC_OUTPUT=$(./scripts/sync_upstream.sh --dry-run 2>&1)
+if echo "$SYNC_OUTPUT" | grep -q "Already in sync"; then
     echo "   ✅ main is already in sync with upstream"
 else
-    echo "   ⚠️  main needs syncing. Run './scripts/sync_upstream.sh' to sync."
-    read -p "   Sync now? (y/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
+    # Check if there are commits to add (upstream ahead) vs commits to remove (local ahead)
+    UPSTREAM_AHEAD=$(echo "$SYNC_OUTPUT" | grep -c "Commits that will be added" || echo "0")
+    LOCAL_AHEAD=$(echo "$SYNC_OUTPUT" | grep -c "Commits that will be removed" || echo "0")
+    
+    if [[ "$UPSTREAM_AHEAD" -gt 0 ]]; then
+        # Upstream has new commits - auto-sync (this is the normal case)
+        echo "   ⚠️  main needs syncing with upstream (new commits available)."
+        echo "   🔄 Syncing automatically..."
         ./scripts/sync_upstream.sh
+    elif [[ "$LOCAL_AHEAD" -gt 0 ]]; then
+        # Local has commits not in upstream - ask (might lose work)
+        echo "   ⚠️  main has local commits not in upstream."
+        echo "   ⚠️  Syncing will remove these commits from main."
+        read -p "   Sync anyway? (y/N): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            ./scripts/sync_upstream.sh
+        else
+            echo "   ⚠️  Skipping sync. Make sure to sync before starting work!"
+        fi
     else
-        echo "   ⚠️  Skipping sync. Make sure to sync before starting work!"
+        # Unknown state - ask
+        echo "   ⚠️  main sync status unclear."
+        read -p "   Sync now? (Y/n): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            ./scripts/sync_upstream.sh
+        else
+            echo "   ⚠️  Skipping sync. Make sure to sync before starting work!"
+        fi
     fi
 fi
 
@@ -128,15 +152,34 @@ fi
 
 # Check if feature branch already exists
 if git rev-parse --verify "$FEATURE_NAME" >/dev/null 2>&1; then
-    echo "   ⚠️  Feature branch '$FEATURE_NAME' already exists"
-    read -p "   Checkout existing branch? (y/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        git checkout "$FEATURE_NAME"
-        echo "   ✅ Checked out existing feature branch"
+    # Check if we're already on this branch
+    if [[ "$(git rev-parse --abbrev-ref HEAD)" == "$FEATURE_NAME" ]]; then
+        echo "   ℹ️  Already on feature branch '$FEATURE_NAME'. Continuing..."
     else
-        echo "   ❌ Aborted. Please provide a different feature name."
-        exit 1
+        # Check if branch has uncommitted changes or unpushed commits
+        git checkout "$FEATURE_NAME" >/dev/null 2>&1
+        HAS_UNCOMMITTED=$(git diff-index --quiet HEAD --; echo $?)
+        LOCAL_COMMITS=$(git rev-list --count origin/"$FEATURE_NAME"..HEAD 2>/dev/null || echo "0")
+        git checkout develop >/dev/null 2>&1
+        
+        if [[ "$HAS_UNCOMMITTED" -eq 1 ]] || [[ "$LOCAL_COMMITS" -gt 0 ]]; then
+            # Branch has work - auto-checkout (probably continuing previous session)
+            echo "   ℹ️  Feature branch '$FEATURE_NAME' exists with work. Checking out..."
+            git checkout "$FEATURE_NAME"
+            echo "   ✅ Checked out existing feature branch"
+        else
+            # Branch exists but no work - ask
+            echo "   ⚠️  Feature branch '$FEATURE_NAME' already exists (no uncommitted changes)."
+            read -p "   Checkout existing branch? (Y/n): " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+                git checkout "$FEATURE_NAME"
+                echo "   ✅ Checked out existing feature branch"
+            else
+                echo "   ❌ Aborted. Please provide a different feature name."
+                exit 1
+            fi
+        fi
     fi
 else
     # Create new feature branch from develop
