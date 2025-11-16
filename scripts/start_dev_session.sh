@@ -136,25 +136,30 @@ else
     echo "   ✅ Merged latest changes from main into develop"
 fi
 
-# Step 3: Create or checkout feature branch
+# Step 3: Create or checkout development branch
 echo ""
-echo "📋 Step 3: Setting up feature branch..."
+echo "📋 Step 3: Setting up development branch..."
 
 if [[ -z "$FEATURE_NAME" ]]; then
-    # Generate feature name from timestamp
+    # Generate session name from timestamp
     TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-    FEATURE_NAME="feature/dev-session-${TIMESTAMP}"
-    echo "   No feature name provided, using: $FEATURE_NAME"
+    FEATURE_NAME="dev/session-${TIMESTAMP}"
+    echo "   No session name provided, using: $FEATURE_NAME"
 else
-    FEATURE_NAME="feature/${FEATURE_NAME}"
-    echo "   Using feature branch: $FEATURE_NAME"
+    # Allow both dev/ and feature/ prefixes, default to dev/ if no prefix
+    if [[ "$FEATURE_NAME" =~ ^(dev/|feature/) ]]; then
+        FEATURE_NAME="${FEATURE_NAME}"
+    else
+        FEATURE_NAME="dev/${FEATURE_NAME}"
+    fi
+    echo "   Using branch: $FEATURE_NAME"
 fi
 
-# Check if feature branch already exists
+# Check if branch already exists
 if git rev-parse --verify "$FEATURE_NAME" >/dev/null 2>&1; then
     # Check if we're already on this branch
     if [[ "$(git rev-parse --abbrev-ref HEAD)" == "$FEATURE_NAME" ]]; then
-        echo "   ℹ️  Already on feature branch '$FEATURE_NAME'. Continuing..."
+        echo "   ℹ️  Already on branch '$FEATURE_NAME'. Continuing..."
     else
         # Check if branch has uncommitted changes or unpushed commits
         git checkout "$FEATURE_NAME" >/dev/null 2>&1
@@ -164,27 +169,27 @@ if git rev-parse --verify "$FEATURE_NAME" >/dev/null 2>&1; then
         
         if [[ "$HAS_UNCOMMITTED" -eq 1 ]] || [[ "$LOCAL_COMMITS" -gt 0 ]]; then
             # Branch has work - auto-checkout (probably continuing previous session)
-            echo "   ℹ️  Feature branch '$FEATURE_NAME' exists with work. Checking out..."
+            echo "   ℹ️  Branch '$FEATURE_NAME' exists with work. Checking out..."
             git checkout "$FEATURE_NAME"
-            echo "   ✅ Checked out existing feature branch"
+            echo "   ✅ Checked out existing branch"
         else
             # Branch exists but no work - ask
-            echo "   ⚠️  Feature branch '$FEATURE_NAME' already exists (no uncommitted changes)."
+            echo "   ⚠️  Branch '$FEATURE_NAME' already exists (no uncommitted changes)."
             read -p "   Checkout existing branch? (Y/n): " -n 1 -r
             echo
             if [[ ! $REPLY =~ ^[Nn]$ ]]; then
                 git checkout "$FEATURE_NAME"
-                echo "   ✅ Checked out existing feature branch"
+                echo "   ✅ Checked out existing branch"
             else
-                echo "   ❌ Aborted. Please provide a different feature name."
+                echo "   ❌ Aborted. Please provide a different branch name."
                 exit 1
             fi
         fi
     fi
 else
-    # Create new feature branch from develop
+    # Create new branch from develop
     git checkout -b "$FEATURE_NAME"
-    echo "   ✅ Created and checked out feature branch: $FEATURE_NAME"
+    echo "   ✅ Created and checked out branch: $FEATURE_NAME"
 fi
 
 # Step 4: Show status
@@ -202,5 +207,10 @@ echo "   1. Make your changes"
 echo "   2. Commit: git add . && git commit -m 'feat: your changes'"
 echo "   3. Push: git push origin $FEATURE_NAME"
 echo "   4. When done, run: ./scripts/end_dev_session.sh"
+echo ""
+echo "Branch naming convention:"
+echo "   - dev/session-{timestamp} - Development sessions (auto-generated)"
+echo "   - dev/{name} - Other development work"
+echo "   - feature/{name} - Feature branches (use explicit 'feature/' prefix)"
 echo ""
 

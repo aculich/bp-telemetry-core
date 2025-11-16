@@ -197,7 +197,7 @@ echo "📋 Step 4: Cleanup"
 # 2. All work is committed and pushed
 # 3. No uncommitted changes
 
-if [[ "$CURRENT_BRANCH" =~ ^feature/ ]] && git diff-index --quiet HEAD --; then
+if [[ "$CURRENT_BRANCH" =~ ^(dev/|feature/) ]] && git diff-index --quiet HEAD --; then
     # Check if branch is pushed
     if git rev-parse --verify "origin/$CURRENT_BRANCH" >/dev/null 2>&1 || \
        [[ "$LOCAL_COMMITS" -eq 0 ]] || [[ "$AUTO_PUSH" == "true" ]]; then
