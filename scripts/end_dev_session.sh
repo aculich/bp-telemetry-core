@@ -173,32 +173,62 @@ Respond with one line per file in format 'IGNORE: filename' or 'COMMIT: filename
             fi
         fi
         
-        # Handle files that should be ignored
+        # Handle files that should be ignored (junk files)
         if [[ ${#FILES_TO_IGNORE[@]} -gt 0 ]]; then
             echo ""
             echo "   📋 Files detected that should probably be ignored:"
             for file in "${FILES_TO_IGNORE[@]}"; do
                 echo "      - $file"
             done
-            read -p "   Add these to .gitignore? (Y/n): " -n 1 -r
+            echo ""
+            echo "   What would you like to do with these files?"
+            echo "      [i] Ignore (add to .gitignore)"
+            echo "      [c] Commit them anyway"
+            echo "      [a] Abort session end"
+            read -p "   Choose (i/c/a): " -n 1 -r
             echo
-            if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-                for file in "${FILES_TO_IGNORE[@]}"; do
-                    # Add pattern to .gitignore
-                    if [[ -f "$file" ]]; then
-                        echo "$(basename "$file")" >> .gitignore
-                    elif [[ -d "$file" ]]; then
-                        echo "$(basename "$file")/" >> .gitignore
-                    fi
-                done
-                echo "   ✅ Added to .gitignore"
-                # Commit .gitignore update
-                git add .gitignore
-                git commit -m "chore: add files to .gitignore" >/dev/null 2>&1 || true
-            fi
+            case $REPLY in
+                [Ii]*)
+                    # Add to .gitignore
+                    for file in "${FILES_TO_IGNORE[@]}"; do
+                        if [[ -f "$file" ]]; then
+                            echo "$(basename "$file")" >> .gitignore
+                        elif [[ -d "$file" ]]; then
+                            echo "$(basename "$file")/" >> .gitignore
+                        fi
+                    done
+                    echo "   ✅ Added to .gitignore"
+                    # Commit .gitignore update
+                    git add .gitignore
+                    git commit -m "chore: add files to .gitignore" >/dev/null 2>&1 || true
+                    ;;
+                [Cc]*)
+                    # Add junk files to commit list
+                    FILES_TO_COMMIT=("${FILES_TO_COMMIT[@]}" "${FILES_TO_IGNORE[@]}")
+                    echo "   ✅ Will commit junk files with other changes"
+                    ;;
+                [Aa]*)
+                    echo "   ❌ Session end cancelled."
+                    exit 1
+                    ;;
+                *)
+                    # Default to ignore
+                    echo "   ℹ️  Defaulting to ignore..."
+                    for file in "${FILES_TO_IGNORE[@]}"; do
+                        if [[ -f "$file" ]]; then
+                            echo "$(basename "$file")" >> .gitignore
+                        elif [[ -d "$file" ]]; then
+                            echo "$(basename "$file")/" >> .gitignore
+                        fi
+                    done
+                    echo "   ✅ Added to .gitignore"
+                    git add .gitignore
+                    git commit -m "chore: add files to .gitignore" >/dev/null 2>&1 || true
+                    ;;
+            esac
         fi
         
-        # Check if there are still files to commit
+        # Check if there are still files to commit (non-junk files, or junk if user chose to commit)
         if [[ "$HAS_UNCOMMITTED" -eq 1 ]] || [[ ${#FILES_TO_COMMIT[@]} -gt 0 ]]; then
             # Generate a useful commit message based on changes
             COMMIT_MSG=""
