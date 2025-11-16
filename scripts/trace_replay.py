@@ -61,6 +61,9 @@ def _load_gif_font(base_size: int = 18):
         "/System/Library/Fonts/SFMono-Regular.otf",
         "/Library/Fonts/Menlo.ttc",
         "/Library/Fonts/SF Mono Regular.ttf",
+        # Homebrew-installed JetBrains Mono (common locations)
+        "/usr/local/opt/jetbrains-mono/share/fonts/TTF/JetBrainsMono-Regular.ttf",
+        "/opt/homebrew/opt/jetbrains-mono/share/fonts/TTF/JetBrainsMono-Regular.ttf",
     ]
     for path in candidates_paths:
         p = Path(path)
@@ -73,6 +76,9 @@ def _load_gif_font(base_size: int = 18):
     candidates_names = [
         "Menlo",
         "SF Mono",
+        "JetBrains Mono",
+        "Fira Code",
+        "Hack",
         "Courier New",
         "Consolas",
         "DejaVu Sans Mono",
@@ -219,6 +225,7 @@ def generate_gif(
     wrap_long: bool = True,
     pretty: bool = True,
     scale_factor: int = 2,
+    line_spacing: int = 4,
 ) -> None:
     """
     Generate an animated GIF replay of the trace.
@@ -243,8 +250,9 @@ def generate_gif(
     bbox = font.getbbox("M")
     char_w = bbox[2] - bbox[0]
     char_h = bbox[3] - bbox[1]
+    line_height = char_h + max(0, line_spacing)
     img_w = width_chars * char_w
-    img_h = height_lines * char_h
+    img_h = height_lines * line_height
 
     max_frames = min(len(events), 200)
     if max_frames <= 0:
@@ -332,7 +340,7 @@ def generate_gif(
         y = 0
         for line in lines[:height_lines]:
             draw.text((0, y), line, font=font, fill=255)
-            y += char_h
+            y += line_height
 
         # Upscale for better legibility in GIF viewers
         if scale_factor > 1:
