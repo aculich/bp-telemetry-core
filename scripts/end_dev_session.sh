@@ -183,9 +183,10 @@ Respond with one line per file in format 'IGNORE: filename' or 'COMMIT: filename
             echo ""
             echo "   What would you like to do with these files?"
             echo "      [i] Ignore (add to .gitignore)"
+            echo "      [l] Leave alone (don't ignore, don't commit)"
             echo "      [c] Commit them anyway"
             echo "      [a] Abort session end"
-            read -p "   Choose (i/c/a): " -n 1 -r
+            read -p "   Choose (i/l/c/a): " -n 1 -r
             echo
             case $REPLY in
                 [Ii]*)
@@ -201,6 +202,10 @@ Respond with one line per file in format 'IGNORE: filename' or 'COMMIT: filename
                     # Commit .gitignore update
                     git add .gitignore
                     git commit -m "chore: add files to .gitignore" >/dev/null 2>&1 || true
+                    ;;
+                [Ll]*)
+                    # Leave alone - don't ignore, don't commit, just continue
+                    echo "   ℹ️  Leaving files alone. They will remain untracked."
                     ;;
                 [Cc]*)
                     # Add junk files to commit list
