@@ -43,6 +43,54 @@ sys.path.insert(0, str(project_root))
 from src.processing.database.sqlite_client import SQLiteClient
 
 
+def _load_gif_font(base_size: int = 18):
+    """
+    Try to load a high-quality monospace TrueType font for GIF rendering.
+
+    On macOS we prefer Menlo / SF Mono. If none of the preferred fonts can be
+    loaded, we fall back to Pillow's built-in bitmap font.
+    """
+    try:
+        from PIL import ImageFont  # type: ignore
+    except Exception:
+        return None
+
+    # Common monospace font candidates (paths and family names)
+    candidates_paths = [
+        "/System/Library/Fonts/Menlo.ttc",
+        "/System/Library/Fonts/SFMono-Regular.otf",
+        "/Library/Fonts/Menlo.ttc",
+        "/Library/Fonts/SF Mono Regular.ttf",
+    ]
+    for path in candidates_paths:
+        p = Path(path)
+        if p.exists():
+            try:
+                return ImageFont.truetype(str(p), base_size)
+            except Exception:
+                continue
+
+    candidates_names = [
+        "Menlo",
+        "SF Mono",
+        "Courier New",
+        "Consolas",
+        "DejaVu Sans Mono",
+    ]
+    for name in candidates_names:
+        try:
+            return ImageFont.truetype(name, base_size)
+        except Exception:
+            continue
+
+    try:
+        from PIL import ImageFont  # type: ignore
+
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+
 @dataclass
 class TraceEvent:
     sequence: int
@@ -185,12 +233,12 @@ def generate_gif(
         return
 
     try:
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import Image, ImageDraw, ImageFont  # type: ignore
     except ImportError:
         print("❌ Pillow is not installed. Run `pip install -r requirements.txt`.")
         return
 
-    font = ImageFont.load_default()
+    font = _load_gif_font(base_size=18) or ImageFont.load_default()
     # Approximate character cell size from the font (Pillow 10+ uses getbbox)
     bbox = font.getbbox("M")
     char_w = bbox[2] - bbox[0]
