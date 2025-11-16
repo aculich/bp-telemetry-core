@@ -18,7 +18,9 @@ cd "$REPO_ROOT"
 FEATURE_NAME="${1:-}"
 
 # Check if sync_upstream.sh exists (scripts should be on develop branch)
-if [[ ! -f "$REPO_ROOT/scripts/sync_upstream.sh" ]]; then
+# Store the path before we potentially switch branches
+SYNC_SCRIPT_PATH="$REPO_ROOT/scripts/sync_upstream.sh"
+if [[ ! -f "$SYNC_SCRIPT_PATH" ]]; then
     echo "❌ Error: Workflow scripts not found."
     echo ""
     echo "These scripts are fork-specific and exist on the 'develop' branch."
@@ -40,6 +42,19 @@ CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 if [[ "$CURRENT_BRANCH" != "main" ]]; then
     echo "⚠️  Currently on '$CURRENT_BRANCH', switching to main..."
     git checkout main
+    
+    # After switching to main, check if sync script still exists
+    # If not, we need to get it from develop temporarily or error out
+    if [[ ! -f "$SYNC_SCRIPT_PATH" ]]; then
+        echo "   ⚠️  sync_upstream.sh not found on main branch."
+        echo "   Creating temporary reference from develop..."
+        git show develop:scripts/sync_upstream.sh > "$SYNC_SCRIPT_PATH" 2>/dev/null || {
+            echo "   ❌ Could not access sync_upstream.sh from develop branch."
+            echo "   Please ensure you're running this from a branch that has access to develop."
+            exit 1
+        }
+        chmod +x "$SYNC_SCRIPT_PATH"
+    fi
 fi
 
 # Check for uncommitted changes
