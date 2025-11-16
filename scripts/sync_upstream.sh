@@ -62,11 +62,10 @@ if ! git remote | grep -q "^upstream$"; then
     exit 1
 fi
 
-# Fetch latest from upstream
+# Fetch latest from upstream (always fetch, even in dry-run mode)
+# Fetching doesn't modify working tree, so it's safe for dry-run previews
 echo "📥 Fetching latest from upstream..."
-if [[ "$DRY_RUN" == "false" ]]; then
-    git fetch upstream
-fi
+git fetch upstream
 
 # Get current commit hashes
 CURRENT_COMMIT=$(git rev-parse HEAD)
