@@ -394,7 +394,7 @@ fi
 
 # Step 4: Show summary
 echo ""
-echo "📋 Step 3: Session Summary"
+echo "📋 Step 3: Session Summary (pre-merge)"
 echo "================================"
 echo "   Branch: $CURRENT_BRANCH"
 echo "   Status: $(git status -sb | head -1 | cut -d' ' -f2-)"
@@ -588,10 +588,16 @@ fi
 
 echo ""
 echo "✅ Development session ended!"
+echo "================================"
 echo ""
-echo "Summary:"
-echo "   - Branch: $CURRENT_BRANCH"
-echo "   - All changes committed and pushed"
-echo "   - Ready for next session"
+echo "Final state:"
+echo "   - Current branch: $(git rev-parse --abbrev-ref HEAD)"
+echo "   - Base branch: $BASE_BRANCH"
+echo "   - Session branch: $CURRENT_BRANCH"
+echo "   - Status: $(git status -sb | head -1 | cut -d' ' -f2-)"
+echo ""
+echo "Tip:"
+echo "   - For day-to-day coding, work on dev/session-* branches."
+echo "   - When a feature branch (feature/*) is ready for develop, run this script from that feature branch to merge it into develop."
 echo ""
 
