@@ -1,5 +1,6 @@
 #!/bin/bash
 # Resume a development session by checking out a recent dev/session branch
+# Only shows branches that have commits (filters out empty sessions)
 #
 # Usage:
 #   ./scripts/resume_dev_session.sh
@@ -17,13 +18,12 @@ echo ""
 
 # Find all dev/session branches (local and remote)
 # Sort by commit date (most recent first)
-RECENT_BRANCHES=$(git for-each-ref \
+ALL_BRANCHES=$(git for-each-ref \
     --sort=-committerdate \
     --format='%(refname:short)|%(committerdate:short)|%(committerdate:relative)' \
-    refs/heads/dev/session-* refs/remotes/origin/dev/session-* 2>/dev/null | \
-    head -10)
+    refs/heads/dev/session-* refs/remotes/origin/dev/session-* 2>/dev/null)
 
-if [[ -z "$RECENT_BRANCHES" ]]; then
+if [[ -z "$ALL_BRANCHES" ]]; then
     echo "❌ No dev/session branches found."
     echo ""
     echo "Start a new session with:"
@@ -31,11 +31,15 @@ if [[ -z "$RECENT_BRANCHES" ]]; then
     exit 1
 fi
 
-# Parse branches and build selection list
+# Filter branches to only include those with commits
+# A branch has commits if it's not at the same commit as develop
 declare -a BRANCH_NAMES
 declare -a BRANCH_DATES
 declare -a BRANCH_RELATIVES
 declare -a BRANCH_REMOTES
+
+# Get develop commit for comparison
+DEVELOP_COMMIT=$(git rev-parse develop 2>/dev/null || git rev-parse origin/develop 2>/dev/null || echo "")
 
 INDEX=1
 while IFS='|' read -r branch date relative; do
@@ -43,9 +47,26 @@ while IFS='|' read -r branch date relative; do
     if [[ "$branch" =~ ^origin/ ]]; then
         BRANCH_NAME="${branch#origin/}"
         IS_REMOTE=true
+        BRANCH_REF="refs/remotes/origin/$BRANCH_NAME"
     else
         BRANCH_NAME="$branch"
         IS_REMOTE=false
+        BRANCH_REF="refs/heads/$BRANCH_NAME"
+    fi
+    
+    # Check if branch has commits (not at same commit as develop)
+    if [[ -n "$DEVELOP_COMMIT" ]]; then
+        BRANCH_COMMIT=$(git rev-parse "$BRANCH_REF" 2>/dev/null || echo "")
+        if [[ -z "$BRANCH_COMMIT" ]]; then
+            continue  # Skip if branch doesn't exist
+        fi
+        
+        # Check if branch has commits beyond develop
+        # A branch has commits if it's not the same as develop or if it has commits not in develop
+        COMMITS_AHEAD=$(git rev-list --count develop.."$BRANCH_REF" 2>/dev/null || echo "0")
+        if [[ "$COMMITS_AHEAD" -eq 0 ]] && [[ "$BRANCH_COMMIT" == "$DEVELOP_COMMIT" ]]; then
+            continue  # Skip empty branches (no commits)
+        fi
     fi
     
     BRANCH_NAMES[$INDEX]="$BRANCH_NAME"
@@ -53,10 +74,24 @@ while IFS='|' read -r branch date relative; do
     BRANCH_RELATIVES[$INDEX]="$relative"
     BRANCH_REMOTES[$INDEX]="$IS_REMOTE"
     INDEX=$((INDEX + 1))
-done <<< "$RECENT_BRANCHES"
+    
+    # Limit to 10 branches
+    if [[ $INDEX -gt 10 ]]; then
+        break
+    fi
+done <<< "$ALL_BRANCHES"
+
+if [[ $INDEX -eq 1 ]]; then
+    echo "❌ No dev/session branches with commits found."
+    echo ""
+    echo "All recent sessions appear to be empty (no commits)."
+    echo "Start a new session with:"
+    echo "   ./scripts/start_dev_session.sh"
+    exit 1
+fi
 
 # Display branches
-echo "📋 Recent development sessions:"
+echo "📋 Recent development sessions (with commits):"
 echo ""
 
 for i in $(seq 1 $((INDEX - 1))); do
