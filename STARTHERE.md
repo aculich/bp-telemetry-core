@@ -271,17 +271,94 @@ for (const composerId of composerIds) {
 
 **Purpose**: Read Cursor's SQLite database for metadata and generation history
 
-**Database Location**:
+**⚠️ CRITICAL DISCOVERY**: Full conversation data is stored in **GLOBAL storage**, not workspace storage!
+
+#### Database Locations
+
+**Workspace-Level Storage** (Per-Workspace):
 - **macOS**: `~/Library/Application Support/Cursor/User/workspaceStorage/{hash}/state.vscdb`
 - **Linux**: `~/.config/Cursor/User/workspaceStorage/{hash}/state.vscdb`
 - **Windows**: `~/AppData/Roaming/Cursor/User/workspaceStorage/{hash}/state.vscdb`
 
-**Critical Table**: `ItemTable`
+**Global Storage** (User-Level, All Workspaces):
+- **macOS**: `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`
+- **Linux**: `~/.config/Cursor/User/globalStorage/state.vscdb`
+- **Windows**: `~/AppData/Roaming/Cursor/User/globalStorage/state.vscdb`
+
+#### Database Tables
+
+**ItemTable** (Workspace & Global):
+- Key-value storage for workspace-specific and global configuration
+- **Workspace keys**: `composer.composerData` (metadata only), `aiService.generations`, `aiService.prompts`
+- **Global keys**: Various configuration keys
+
+**cursorDiskKV** (Global Storage - CRITICAL):
+- **Primary storage for full composer conversations**
+- Key pattern: `composerData:{composerId}`
+- Contains: Full composer data WITH embedded bubbles (conversation array)
+- **Key Finding**: Bubbles are embedded in `conversation` array, NOT stored as separate `bubbleData:{id}` entries
+
+#### Data Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Workspace Storage (ItemTable)                               │
+│ Key: composer.composerData                                  │
+│ Contains: Metadata only (IDs, names, timestamps)           │
+│                                                             │
+│ Structure:                                                  │
+│ {                                                           │
+│   "allComposers": [                                         │
+│     { composerId, name, createdAt, lastUpdatedAt }          │
+│   ]                                                         │
+│ }                                                           │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            │ composerId references
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Global Storage (cursorDiskKV)                               │
+│ Key: composerData:{composerId}                              │
+│ Contains: Full composer data WITH embedded bubbles          │
+│                                                             │
+│ Structure:                                                  │
+│ {                                                           │
+│   composerId, name, createdAt, lastUpdatedAt,              │
+│   conversation: [                                           │
+│     { bubbleId, type, text, ... }  ← Bubbles embedded here  │
+│   ]                                                         │
+│ }                                                           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Query Patterns
+
+**Step 1: Get Composer Metadata (Workspace Storage)**
+```typescript
+// Query workspace storage ItemTable
+const row = db
+  .prepare('SELECT value FROM ItemTable WHERE key = ?')
+  .get('composer.composerData');
+
+const composerMetadata = JSON.parse(row.value.toString('utf-8'));
+// Returns: { allComposers: [{ composerId, name, createdAt, ... }] }
+```
+
+**Step 2: Get Full Composer Data (Global Storage)**
+```typescript
+// Query global storage cursorDiskKV
+const globalDb = new Database(globalStoragePath, { readonly: true });
+const row = globalDb
+  .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
+  .get(`composerData:${composerId}`);
+
+const fullComposerData = JSON.parse(row.value.toString('utf-8'));
+// Returns: { composerId, name, conversation: [...], modelConfig: {...}, ... }
+```
 
 **Key Keys**:
-- `composer.composerData` - Composer session metadata
-- `aiService.generations` - AI generation history (JSON array)
-- `aiService.prompts` - Prompt history (JSON array)
+- **Workspace ItemTable**: `composer.composerData` (metadata), `aiService.generations`, `aiService.prompts`
+- **Global cursorDiskKV**: `composerData:{composerId}` (full conversations with embedded bubbles)
 
 **Read-Only Access Pattern** (CRITICAL):
 ```typescript
@@ -299,6 +376,33 @@ const row = db
   .get('composer.composerData');
 
 const composerData = JSON.parse(row.value.toString('utf-8'));
+```
+
+**Querying Global Storage (cursorDiskKV)**:
+```typescript
+// Open global storage database
+const globalDbPath = path.join(
+  os.homedir(),
+  'Library/Application Support/Cursor/User/globalStorage/state.vscdb'
+);
+const globalDb = new Database(globalDbPath, { readonly: true });
+
+// Configure for safe reads
+globalDb.pragma('journal_mode=WAL');
+globalDb.pragma('read_uncommitted=1');
+globalDb.pragma('query_only=1');
+
+// Query for composer data (use LIKE for pattern matching)
+const rows = globalDb
+  .prepare('SELECT key, value FROM cursorDiskKV WHERE key LIKE ?')
+  .all('composerData:%');
+
+// Or query specific composer
+const row = globalDb
+  .prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
+  .get(`composerData:${composerId}`);
+
+const fullComposerData = JSON.parse(row.value.toString('utf-8'));
 ```
 
 **Retry Logic** (Required):
@@ -332,17 +436,24 @@ async function readWithRetry<T>(
 }
 ```
 
-**What Database CAN Capture**:
+**What Workspace Database CAN Capture**:
 - ✅ Generation metadata (UUIDs, timestamps, types)
-- ✅ Composer IDs and session metadata
-- ✅ Prompt history
-- ✅ Generation history
+- ✅ Composer IDs and session metadata (from `composer.composerData`)
+- ✅ Prompt history (`aiService.prompts`)
+- ✅ Generation history (`aiService.generations`)
+
+**What Global Database CAN Capture**:
+- ✅ **Full composer conversations** with embedded bubbles (`cursorDiskKV.composerData:{id}`)
+- ✅ **Model configuration** (`modelConfig.modelName` at composer level)
+- ✅ **Message-level model info** (`conversation[].modelInfo.modelName`)
+- ✅ **Tool usage data** (`capabilitiesRan`, `capabilityStatuses`)
+- ✅ **Agent mode** (`unifiedMode`, `forceMode`)
+- ✅ **Timing information** (`timingInfo.clientStartTime`, etc.)
 
 **What Database CANNOT Capture**:
-- ❌ Model information (not in ItemTable)
-- ❌ Token usage (not stored)
-- ❌ Request duration (not stored)
-- ❌ Full conversation content (only in workspace storage)
+- ❌ Token usage per message (only cumulative `tokenCountUpUntilHere` available)
+- ❌ Request duration (timing info available but not duration calculation)
+- ❌ Thinking/reasoning content (not reliably persisted, may be in `intermediateChunks`)
 
 ---
 
@@ -357,7 +468,7 @@ async function readWithRetry<T>(
 | **Agent Mode** | ❌ | ✅ `unifiedMode`<br>`forceMode` | ✅ `composer.composerData` | ✅ **AVAILABLE** |
 | **Token Usage** | ❌ | ❌ | ❌ | ❌ **NOT AVAILABLE** |
 | **Duration** | ❌ | ⚠️ Partial (VS Code only) | ❌ | ❌ **NOT AVAILABLE** |
-| **Full Conversations** | ⚠️ Partial (current event) | ✅ `nativeComposers` | ❌ | ✅ **AVAILABLE** |
+| **Full Conversations** | ⚠️ Partial (current event) | ✅ `nativeComposers`<br>✅ Global `cursorDiskKV` | ✅ Global `cursorDiskKV` | ✅ **AVAILABLE** |
 | **File Edits** | ✅ `beforeFileEdit`<br>`afterFileEdit` | ❌ | ❌ | ✅ **AVAILABLE** |
 | **Shell Commands** | ✅ `beforeShellExecution`<br>`afterShellExecution` | ❌ | ❌ | ✅ **AVAILABLE** |
 | **User Prompts** | ✅ `beforeSubmitPrompt` | ✅ In conversations | ❌ | ✅ **AVAILABLE** |
@@ -367,7 +478,9 @@ async function readWithRetry<T>(
 
 ### Model Information Extraction
 
-**Source**: Workspace Storage (`composerData:{composerId}`)
+**Source**: Global Storage (`cursorDiskKV.composerData:{composerId}`)
+
+**⚠️ CRITICAL**: Model information is **NOT stored at bubble level** in database. Must extract from composer-level or message-level fields.
 
 **Structure**:
 ```typescript
@@ -377,82 +490,99 @@ interface NativeComposer {
   };
   conversation: Array<{
     modelInfo?: {
-      modelName?: string;  // Message-level (per message)
+      modelName?: string;  // Message-level (per message, not always present)
     };
+    // Note: modelType and aiStreamingSettings are NOT persisted per bubble
   }>;
 }
 ```
 
-**Extraction Logic**:
+**Extraction Logic** (Enhanced):
 ```typescript
 function extractModelName(composer: NativeComposer, message?: any): string {
-  // Try message-level first (if available)
+  // Priority 1: Message-level model info (most accurate)
   if (message?.modelInfo?.modelName) {
     return message.modelInfo.modelName;
   }
   
-  // Fall back to composer-level (most recent model)
+  // Priority 2: Composer-level model config (fallback)
   if (composer.modelConfig?.modelName) {
     return composer.modelConfig.modelName;
   }
+  
+  // Priority 3: Check for model in other locations (if available)
+  // Note: modelType is NOT persisted, only modelName
   
   return "";  // Not available
 }
 ```
 
-**Limitations**:
+**Display Format** (for markdown/conversation output):
+```typescript
+function formatModelInfo(message: NormalizedMessage, composer: NativeComposer): string {
+  const modelName = extractModelName(composer, message);
+  if (!modelName) return "";
+  
+  // Format: "model claude-3-5-sonnet-20241022"
+  return `model ${modelName}`;
+}
+```
+
+**Limitations** (from Ben's research):
 - Only **most recent model** per composer is stored at composer level
 - Individual messages may have `modelInfo.modelName`, but not consistently populated
+- `modelType` and `aiStreamingSettings` are **NOT persisted** (server-side only)
 - Historical model usage is limited (see SpecStory changelog v0.20.0)
+- Model information may be missing for older conversations
 
 ---
 
 ### Tool Usage Extraction
 
-**Source**: Workspace Storage
+**Source**: Global Storage (`cursorDiskKV.composerData:{id}`)
 
-**Structure**:
-- **Version < 3**: `capabilities[type=15].data.bubbleDataMap[bubbleId]`
-- **Version >= 3**: `message.toolFormerData` (direct)
+**⚠️ IMPORTANT**: Tool usage structure differs from expected format!
 
-**Extraction Logic**:
+**Actual Structure** (from Ben's research):
+- **NOT**: `toolFormerdata.toolCalls[]` array (expected but not found)
+- **ACTUAL**: `capabilitiesRan` dict with capability names as keys
+- **ALSO**: `capabilityStatuses` dict (may serve similar purpose)
+- **ALSO**: `codeBlocks` array (may contain tool execution results)
+
+**Extraction Logic** (Corrected):
 ```typescript
 function extractToolUsage(composer: NativeComposer): any[] {
   const tools: any[] = [];
   
-  if (!composer.conversation || !composer.capabilities) {
-    return tools;
-  }
-  
-  // Find capability type 15 (tool usage)
-  const toolCapability = composer.capabilities.find(c => c.type === 15);
-  if (!toolCapability) {
+  if (!composer.conversation) {
     return tools;
   }
   
   // Process each conversation message
   for (const message of composer.conversation) {
+    // Check for tool usage (capabilityType 15)
     if (message.capabilityType === 15) {
+      // Try multiple sources for tool data
       let toolData: any = null;
       
-      // Version >= 3: use toolFormerData directly
-      if (composer._v && composer._v >= 3 && message.toolFormerData) {
-        toolData = message.toolFormerData;
+      // Method 1: capabilitiesRan dict (actual structure)
+      if (message.capabilitiesRan) {
+        toolData = message.capabilitiesRan;
       }
-      // Version < 3: extract from bubbleDataMap
-      else if (toolCapability.data?.bubbleDataMap) {
-        try {
-          const bubbleDataMap = JSON.parse(toolCapability.data.bubbleDataMap);
-          toolData = bubbleDataMap[message.bubbleId];
-        } catch (error) {
-          console.error("Error parsing bubbleDataMap:", error);
-        }
+      // Method 2: capabilityStatuses (alternative structure)
+      else if (message.capabilityStatuses) {
+        toolData = message.capabilityStatuses;
+      }
+      // Method 3: codeBlocks (may contain execution results)
+      else if (message.codeBlocks && message.codeBlocks.length > 0) {
+        toolData = { codeBlocks: message.codeBlocks };
       }
       
       if (toolData) {
         tools.push({
           bubble_id: message.bubbleId,
           tool_data: toolData,
+          capability_type: message.capabilityType,
           version: composer._v,
         });
       }
@@ -460,6 +590,22 @@ function extractToolUsage(composer: NativeComposer): any[] {
   }
   
   return tools;
+}
+```
+
+**Legacy Support** (if needed for older versions):
+```typescript
+// For version < 3, may need to check capabilities array
+if (composer.capabilities) {
+  const toolCapability = composer.capabilities.find(c => c.type === 15);
+  if (toolCapability?.data?.bubbleDataMap) {
+    try {
+      const bubbleDataMap = JSON.parse(toolCapability.data.bubbleDataMap);
+      toolData = bubbleDataMap[message.bubbleId];
+    } catch (error) {
+      console.error("Error parsing bubbleDataMap:", error);
+    }
+  }
 }
 ```
 
@@ -667,7 +813,8 @@ redis-cli XREAD COUNT 10 STREAMS telemetry:events 0
 
 - **Extension**: `src/capture/cursor/extension/`
 - **Hooks**: `src/capture/cursor/hooks/`
-- **Database**: `~/Library/Application Support/Cursor/User/workspaceStorage/{hash}/state.vscdb`
+- **Workspace Database**: `~/Library/Application Support/Cursor/User/workspaceStorage/{hash}/state.vscdb`
+- **Global Database**: `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` ⚠️ **CRITICAL**
 - **Session Files**: `~/.blueplane/cursor-session/{workspace_hash}.json`
 - **Global Hooks**: `~/.cursor/hooks/`
 
@@ -697,4 +844,67 @@ redis-cli XREAD COUNT 10 STREAMS telemetry:events 0
 ---
 
 **Remember**: Cursor instrumentation requires all three layers (hooks, extension, database) to capture complete telemetry. No single method provides everything!
+
+---
+
+## Key Learnings from Research
+
+### Global vs Workspace Storage
+
+**Critical Discovery**: Full conversation data with embedded bubbles is stored in **GLOBAL storage** (`cursorDiskKV` table), not workspace storage!
+
+- **Workspace storage** (`ItemTable`): Contains metadata only (`composer.composerData` with `allComposers` list)
+- **Global storage** (`cursorDiskKV`): Contains full composer data with `conversation` array and embedded bubbles
+
+**Query Pattern**:
+1. Query workspace `ItemTable` for composer IDs: `SELECT value FROM ItemTable WHERE key = 'composer.composerData'`
+2. Extract `allComposers` array to get composer IDs
+3. Query global `cursorDiskKV` for each composer: `SELECT value FROM cursorDiskKV WHERE key = 'composerData:{composerId}'`
+4. Parse JSON to get full composer data with embedded bubbles
+
+### Bubbles Are Embedded
+
+**Key Finding**: Bubbles are **NOT** stored as separate `bubbleData:{bubbleId}` entries. They are embedded directly in the `conversation` array within `composerData:{composerId}` entries.
+
+- ❌ **NOT**: `bubbleData:{bubbleId}` keys in cursorDiskKV
+- ✅ **ACTUAL**: Bubbles embedded in `composerData:{composerId}.conversation[]` array
+
+### Tool Usage Structure
+
+**Actual Structure** (differs from expected):
+- **Expected**: `toolFormerdata.toolCalls[]` array
+- **Actual**: `capabilitiesRan` dict with capability names as keys
+- **Also**: `capabilityStatuses` dict and `codeBlocks` array may contain tool data
+
+### Model Information
+
+**Availability**:
+- ✅ Available at composer level: `modelConfig.modelName`
+- ⚠️ Partially available at message level: `conversation[].modelInfo.modelName` (not always present)
+- ❌ **NOT** available: `modelType`, `aiStreamingSettings` (server-side only)
+
+### Missing Fields
+
+**Not Persisted** (server-side only or removed):
+- `usageData` (composer-level)
+- `modelType` (bubble-level)
+- `aiStreamingSettings` (bubble-level)
+- `thinking` (may be in `intermediateChunks`, needs investigation)
+- Per-message token counts (only cumulative `tokenCountUpUntilHere` available)
+
+### Best Practices from Research
+
+1. **Always query both tables**: Workspace `ItemTable` for metadata, global `cursorDiskKV` for full conversations
+2. **Handle schema versions**: Check `_v` field for version-specific logic
+3. **Retry on errors**: Database may be locked while Cursor is writing
+4. **Parse JSON carefully**: Values stored as BLOB/text JSON strings
+5. **Check field existence**: Many fields are optional and may not be present
+
+---
+
+## Related Documentation
+
+- **[CURSOR_DATA_LOCATION_MASTER_README.md](./docs/CURSOR_DATA_LOCATION_MASTER_README.md)** - Comprehensive guide to data locations (Ben's research)
+- **[MISSING_MARKDOWN_FEATURES.md](./docs/MISSING_MARKDOWN_FEATURES.md)** - What's missing vs reference implementation
+- **[example_cursor_capture/](./docs/example_cursor_capture/)** - Reference JavaScript implementations
 
