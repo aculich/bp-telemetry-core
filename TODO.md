@@ -108,7 +108,8 @@
   - [ ] Basic logging is sufficient to debug startup failures, Redis connectivity issues, and SQLite write problems without diving into code.
 
 - **Tooling & docs**
-  - [ ] There is at least one automated or semi-automated ingest test that can be run locally to verify ingest correctness after changes.
-  - [ ] Documentation clearly explains how this Python server ingest layer fits into the three-layer Cursor instrumentation strategy from `STARTHERE.md`, and how to run/verify it during development.
+  - [ ] There is at least one automated or semi-automated ingest test that can be run locally to verify ingest correctness after changes (e.g. `scripts/test_end_to_end.py`).
+  - [ ] There is a lightweight inspection tool for recent traces (e.g. `scripts/show_recent_traces.py`) to support manual/live-session validation.
+  - [ ] Documentation (README + `STARTHERE.md`) clearly explains how this Python server ingest layer fits into the three-layer Cursor instrumentation strategy, and how to run/verify it during development.
 
 
