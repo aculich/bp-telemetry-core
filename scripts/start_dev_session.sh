@@ -169,6 +169,25 @@ if [[ -n "$FEATURE_BRANCH" ]]; then
         BASE_BRANCH="$FEATURE_BRANCH_NAME"
         echo "   ✅ Created feature branch: $FEATURE_BRANCH_NAME"
     fi
+
+    # Optionally rebase feature branch onto latest develop
+    if [[ "$BASE_BRANCH" != "develop" ]]; then
+        COMMITS_FROM_FEATURE_TO_DEVELOP=$(git rev-list --count "$FEATURE_BRANCH_NAME"..develop 2>/dev/null || echo "0")
+        if [[ "$COMMITS_FROM_FEATURE_TO_DEVELOP" -gt 0 ]]; then
+            echo "   ⚠️  develop has $COMMITS_FROM_FEATURE_TO_DEVELOP commit(s) that are not in $FEATURE_BRANCH_NAME."
+            read -p "   Rebase $FEATURE_BRANCH_NAME onto develop before starting the session? (Y/n): " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+                echo "   🔄 Rebasing $FEATURE_BRANCH_NAME onto develop..."
+                if ! git rebase develop; then
+                    echo "   ❌ Rebase failed. Please resolve conflicts and re-run this script."
+                    exit 1
+                fi
+            else
+                echo "   ⚠️  Continuing without rebasing. Feature branch is behind develop."
+            fi
+        fi
+    fi
 else
     echo "   No feature branch specified, using develop as base"
 fi

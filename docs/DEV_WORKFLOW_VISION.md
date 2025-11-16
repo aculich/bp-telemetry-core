@@ -41,9 +41,13 @@ For task‑level, “how to” documentation, see `DEV_SESSION_WORKFLOW.md`.
        - `./scripts/start_dev_session.sh` → session from `develop`.
        - `./scripts/start_dev_session.sh my-feature` → session from `feature/my-feature`.
        - `./scripts/start_dev_session.sh my-feature session-name` → named session from that feature.
-    4. Creates or reuses a **session branch** `dev/session-*` off the chosen base branch.
-    5. Stores the base branch in git config: `branch.<session>.baseBranch` so that `end_dev_session.sh` knows where to merge.
-    6. Shows current status and next‑step instructions.
+    4. If starting from a feature branch, optionally suggests **rebasing the feature onto the latest `develop`**:
+       - Detects if `develop` has commits not in `feature/my-feature`.
+       - Prompts: “Rebase feature/my-feature onto develop before starting the session? (Y/n)”.
+       - Runs `git rebase develop` if you accept; aborts on conflicts with clear instructions.
+    5. Creates or reuses a **session branch** `dev/session-*` off the chosen base branch.
+    6. Stores the base branch in git config: `branch.<session>.baseBranch` so that `end_dev_session.sh` knows where to merge.
+    7. Shows current status and next‑step instructions.
   - Difference from v1:
     - v1 treated `develop` as the implicit merge target for all sessions.
     - v2 makes the base branch explicit (feature or `develop`) and records it for later.

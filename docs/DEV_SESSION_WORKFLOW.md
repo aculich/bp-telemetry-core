@@ -81,8 +81,11 @@ Starts a new development session by:
 - Checks if `main` needs syncing (asks for confirmation)
 - Updates `develop` with latest from `main`
 - If feature branch provided: creates/checks out `feature/{name}`
-- Creates session branch: `dev/session-{timestamp}` from feature branch (or develop)
-- Stores base branch in git config for proper merge target
+- If starting from a feature branch and `develop` has new commits:
+  - Offers to **rebase the feature branch onto `develop`** before creating the session
+  - Aborts with clear instructions if the rebase hits conflicts
+- Creates session branch: `dev/session-{timestamp}` from feature branch (or `develop`)
+- Stores base branch in git config for proper merge target (`branch.<session>.baseBranch`)
 - Shows status summary
 
 **Example:**
