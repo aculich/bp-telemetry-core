@@ -230,6 +230,27 @@ Respond with one line per file in format 'IGNORE: filename' or 'COMMIT: filename
         
         # Check if there are still files to commit (non-junk files, or junk if user chose to commit)
         if [[ "$HAS_UNCOMMITTED" -eq 1 ]] || [[ ${#FILES_TO_COMMIT[@]} -gt 0 ]]; then
+            # Show what will be committed
+            echo ""
+            echo "   📋 Files that will be committed:"
+            
+            # Show modified files
+            if [[ "$HAS_UNCOMMITTED" -eq 1 ]]; then
+                MODIFIED_FILES=$(git diff --name-only HEAD)
+                echo "   Modified files:"
+                while IFS= read -r file; do
+                    echo "      M $file"
+                done <<< "$MODIFIED_FILES"
+            fi
+            
+            # Show new files to be added
+            if [[ ${#FILES_TO_COMMIT[@]} -gt 0 ]]; then
+                echo "   New files to add:"
+                for file in "${FILES_TO_COMMIT[@]}"; do
+                    echo "      A $file"
+                done
+            fi
+            
             # Generate a useful commit message based on changes
             COMMIT_MSG=""
             if [[ "$HAS_UNCOMMITTED" -eq 1 ]]; then
@@ -260,6 +281,7 @@ Respond with one line per file in format 'IGNORE: filename' or 'COMMIT: filename
                 fi
             fi
             
+            echo ""
             # Auto-commit by default (Y), but allow override
             read -p "   Commit these changes? (Y/n): " -n 1 -r
             echo
