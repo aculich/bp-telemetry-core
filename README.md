@@ -238,6 +238,53 @@ This server, together with the Python hooks and Cursor extension described in
 `STARTHERE.md`, forms the Layer 2 portion of the three-layer Cursor instrumentation
 strategy (hooks → Redis → Python server → SQLite/CDC).
 
+##### Trace Replay & GIF Capture
+
+For local inspection and sharing of traces recorded in `raw_traces`, the repo includes
+simple developer tooling:
+
+- `scripts/show_recent_traces.py` – list recent events from `raw_traces`:
+
+  ```bash
+  # Show recent Cursor events
+  python scripts/show_recent_traces.py --platform cursor --limit 50
+
+  # Filter by a specific session
+  python scripts/show_recent_traces.py --session-id curs_... --limit 100
+  ```
+
+- `scripts/trace_replay.py` – curses-based interactive replay and GIF export:
+
+  ```bash
+  # Interactive replay of the longest Cursor session
+  python scripts/trace_replay.py --platform cursor --limit 200
+
+  # Replay a specific session
+  python scripts/trace_replay.py --platform cursor --session-id curs_1763... --limit 200
+
+  # Generate an animated GIF of a replay (requires Pillow)
+  python scripts/trace_replay.py \
+    --platform cursor \
+    --limit 60 \
+    --gif ./trace_replay_demo.gif
+  ```
+
+  **Interactive keys (lower-case):**
+
+  - `q` / `esc`: quit
+  - `j` / `↓`: next event
+  - `k` / `↑`: previous event
+  - `space`: toggle auto-play on/off
+  - `h` / `←`: slow down auto-play (increase delay)
+  - `l` / `→`: speed up auto-play (decrease delay)
+  - `w`: toggle JSON line wrapping
+  - `r`: toggle JSON render mode (pretty vs compact)
+
+  GIF rendering uses a high-quality monospace TrueType font when available
+  (Menlo / SF Mono / JetBrains Mono / Fira Code / Hack, etc.), with extra line
+  spacing and upscaling for legibility. Pillow is an optional dependency listed in
+  `requirements.txt` and is only required if you use the `--gif` flag.
+
 ##### Inspecting DLQ and Retry State
 
 The fast-path consumer uses Redis Streams Pending Entries List (PEL) for retries and a
