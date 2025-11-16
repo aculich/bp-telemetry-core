@@ -403,6 +403,9 @@ echo ""
 # Step 5: Optional - merge into base branch (develop)
 echo "📋 Step 4: Merge into base branch"
 
+# Track if we merged (so we know we're already on develop)
+MERGED_INTO_DEVELOP=false
+
 # Determine base branch (what we branched from)
 # Default to develop, but try to detect actual base
 BASE_BRANCH="develop"
@@ -427,7 +430,7 @@ if [[ "$COMMITS_TO_MERGE" -gt 0 ]]; then
         if command -v llm >/dev/null 2>&1; then
             echo "   🤖 Generating merge commit message with AI..."
             
-            # Get commit messages from this branch
+            # Get commit messages from this branch (before switching)
             COMMIT_MESSAGES=$(git log --format="%s" "$BASE_BRANCH".."$CURRENT_BRANCH" | head -20)
             COMMIT_COUNT=$(git rev-list --count "$BASE_BRANCH".."$CURRENT_BRANCH")
             
@@ -459,18 +462,31 @@ Generate a single-line merge commit message in conventional commit format (e.g.,
         echo "   Merge message: $MERGE_MSG"
         
         # Switch to base branch first
-        git checkout "$BASE_BRANCH" >/dev/null 2>&1 || {
-            echo "   ⚠️  Could not checkout $BASE_BRANCH. Skipping merge."
-            git checkout "$CURRENT_BRANCH" >/dev/null 2>&1
-        }
-        
-        # Merge the session branch
-        if git merge --no-ff "$CURRENT_BRANCH" -m "$MERGE_MSG" 2>&1; then
-            echo "   ✅ Merged $CURRENT_BRANCH into $BASE_BRANCH"
+        if git checkout "$BASE_BRANCH" >/dev/null 2>&1; then
+            # Merge the session branch
+            if git merge --no-ff "$CURRENT_BRANCH" -m "$MERGE_MSG" 2>&1; then
+                echo "   ✅ Merged $CURRENT_BRANCH into $BASE_BRANCH"
+                MERGED_INTO_DEVELOP=true
+            else
+                # Merge failed - check if it's a conflict or other error
+                if git diff-index --quiet HEAD -- 2>/dev/null; then
+                    # No conflicts, merge might have completed
+                    echo "   ✅ Merge completed"
+                    MERGED_INTO_DEVELOP=true
+                else
+                    echo "   ❌ Merge failed with conflicts. Resolve conflicts and complete merge manually."
+                    echo "   Current branch: $(git rev-parse --abbrev-ref HEAD)"
+                    echo ""
+                    echo "   To complete the merge:"
+                    echo "   1. Resolve conflicts"
+                    echo "   2. git add <resolved-files>"
+                    echo "   3. git commit"
+                    exit 1
+                fi
+            fi
         else
-            echo "   ❌ Merge failed. Resolve conflicts and complete merge manually."
-            echo "   Current branch: $(git rev-parse --abbrev-ref HEAD)"
-            exit 1
+            echo "   ⚠️  Could not checkout $BASE_BRANCH. Skipping merge."
+            echo "   Staying on $CURRENT_BRANCH"
         fi
     else
         echo "   ⚠️  Skipping merge. Branch remains separate."
@@ -479,38 +495,60 @@ else
     echo "   ℹ️  No commits to merge (branch is at same commit as $BASE_BRANCH)"
 fi
 
-# Step 6: Optional - switch back to develop
+# Step 6: Optional - switch back to develop (only if we didn't merge)
 echo ""
 echo "📋 Step 5: Cleanup"
 
-# Auto-switch to develop if:
-# 1. We're on a feature branch (not develop/main)
-# 2. All work is committed and pushed
-# 3. No uncommitted changes
-
-if [[ "$CURRENT_BRANCH" =~ ^(dev/|feature/) ]] && git diff-index --quiet HEAD --; then
-    # Check if branch is pushed
-    if git rev-parse --verify "origin/$CURRENT_BRANCH" >/dev/null 2>&1 || \
-       [[ "$LOCAL_COMMITS" -eq 0 ]] || [[ "$AUTO_PUSH" == "true" ]]; then
-        echo "   🔄 Switching back to develop (auto)..."
-        git checkout develop
-        echo "   ✅ Switched to develop branch"
+# If we merged, we're already on develop, so skip switching
+if [[ "$MERGED_INTO_DEVELOP" == "true" ]]; then
+    CURRENT_BRANCH_AFTER_MERGE=$(git rev-parse --abbrev-ref HEAD)
+    if [[ "$CURRENT_BRANCH_AFTER_MERGE" == "$BASE_BRANCH" ]]; then
+        echo "   ✅ Already on $BASE_BRANCH (after merge)"
     else
-        # Branch not pushed, ask
+        echo "   ⚠️  Expected to be on $BASE_BRANCH but on $CURRENT_BRANCH_AFTER_MERGE"
+        read -p "   Switch to $BASE_BRANCH? (Y/n): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            git checkout "$BASE_BRANCH"
+            echo "   ✅ Switched to $BASE_BRANCH"
+        fi
+    fi
+elif [[ "$CURRENT_BRANCH" =~ ^(dev/|feature/) ]] && git diff-index --quiet HEAD --; then
+    # We didn't merge, so check if we should switch back to develop
+    CURRENT_BRANCH_NOW=$(git rev-parse --abbrev-ref HEAD)
+    
+    # Only switch if we're still on the session branch
+    if [[ "$CURRENT_BRANCH_NOW" == "$CURRENT_BRANCH" ]]; then
+        # Check if branch is pushed
+        if git rev-parse --verify "origin/$CURRENT_BRANCH" >/dev/null 2>&1 || \
+           [[ "$LOCAL_COMMITS" -eq 0 ]] || [[ "$AUTO_PUSH" == "true" ]]; then
+            echo "   🔄 Switching back to develop (auto)..."
+            git checkout develop
+            echo "   ✅ Switched to develop branch"
+        else
+            # Branch not pushed, ask
+            read -p "   Switch back to develop branch? (Y/n): " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+                git checkout develop
+                echo "   ✅ Switched to develop branch"
+            fi
+        fi
+    else
+        echo "   ℹ️  Already on $CURRENT_BRANCH_NOW"
+    fi
+else
+    # On develop or has uncommitted changes - ask
+    CURRENT_BRANCH_NOW=$(git rev-parse --abbrev-ref HEAD)
+    if [[ "$CURRENT_BRANCH_NOW" != "develop" ]]; then
         read -p "   Switch back to develop branch? (Y/n): " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Nn]$ ]]; then
             git checkout develop
             echo "   ✅ Switched to develop branch"
         fi
-    fi
-else
-    # On develop or has uncommitted changes - ask
-    read -p "   Switch back to develop branch? (Y/n): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-        git checkout develop
-        echo "   ✅ Switched to develop branch"
+    else
+        echo "   ✅ Already on develop branch"
     fi
 fi
 
