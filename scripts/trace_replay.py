@@ -166,10 +166,11 @@ def generate_gif(
     events: SeqType[TraceEvent],
     gif_path: str,
     auto_delay: float,
-    width_chars: int = 100,
-    height_lines: int = 30,
+    width_chars: int = 160,
+    height_lines: int = 40,
     wrap_long: bool = True,
     pretty: bool = True,
+    scale_factor: int = 2,
 ) -> None:
     """
     Generate an animated GIF replay of the trace.
@@ -278,14 +279,23 @@ def generate_gif(
             lines.append("")
 
         # Render to image
-        img = Image.new("L", (img_w, img_h), color=0)  # grayscale
-        draw = ImageDraw.Draw(img)
+        base = Image.new("L", (img_w, img_h), color=0)  # grayscale
+        draw = ImageDraw.Draw(base)
         y = 0
         for line in lines[:height_lines]:
             draw.text((0, y), line, font=font, fill=255)
             y += char_h
 
-        frames.append(img)
+        # Upscale for better legibility in GIF viewers
+        if scale_factor > 1:
+            frame = base.resize(
+                (img_w * scale_factor, img_h * scale_factor),
+                resample=Image.NEAREST,
+            )
+        else:
+            frame = base
+
+        frames.append(frame)
 
         if selected < len(events) - 1:
             selected += 1
