@@ -9,11 +9,11 @@ Curses-based trace replay viewer for Blueplane Telemetry Core.
 This script replays events from the SQLite raw_traces table in a terminal UI,
 similar in spirit to asciinema but driven by telemetry events.
 
-Features:
-- Auto-play through events with a configurable delay
-- Manual navigation with j/k or arrow keys
-- Session and platform filtering
-- Optional non-UI mode for quick inspection / testing
+features:
+- auto-play through events with a configurable delay
+- manual navigation with j/k or arrow keys
+- session and platform filtering
+- optional non-ui mode for quick inspection / testing
 
 Examples:
     # Replay the most recent Cursor session interactively
@@ -162,6 +162,153 @@ def print_events(events: SeqType[TraceEvent]) -> None:
         )
 
 
+def generate_gif(
+    events: SeqType[TraceEvent],
+    gif_path: str,
+    auto_delay: float,
+    width_chars: int = 100,
+    height_lines: int = 30,
+    wrap_long: bool = True,
+    pretty: bool = True,
+) -> None:
+    """
+    Generate an animated GIF replay of the trace.
+
+    The GIF is rendered off-screen using Pillow and mimics the textual UI:
+    - a simple header line
+    - a small scrolling window of events around the current selection
+    - a JSON details block for the selected event
+    """
+    if not events:
+        print("ℹ️  No matching events found, not generating GIF.")
+        return
+
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        print("❌ Pillow is not installed. Run `pip install -r requirements.txt`.")
+        return
+
+    font = ImageFont.load_default()
+    # Approximate character cell size from the font (Pillow 10+ uses getbbox)
+    bbox = font.getbbox("M")
+    char_w = bbox[2] - bbox[0]
+    char_h = bbox[3] - bbox[1]
+    img_w = width_chars * char_w
+    img_h = height_lines * char_h
+
+    max_frames = min(len(events), 200)
+    if max_frames <= 0:
+        print("ℹ️  No events to render into GIF.")
+        return
+
+    # Convert delay in seconds to per-frame duration in ms
+    duration_ms = int(max(auto_delay, 0.2) * 1000)
+
+    frames: list[Image.Image] = []
+    selected = 0
+
+    for _ in range(max_frames):
+        ev = events[selected]
+        lines: list[str] = []
+
+        # Header
+        header = (
+            f"trace replay gif | session={events[0].session_id} "
+            f"platform={events[0].platform} "
+            f"[{selected+1}/{len(events)}]"
+        )
+        lines.append(header[:width_chars])
+        lines.append("-" * width_chars)
+
+        # Timeline window around current event
+        window = 5
+        start_idx = max(0, selected - window)
+        end_idx = min(len(events), selected + window + 1)
+        for idx in range(start_idx, end_idx):
+            e = events[idx]
+            prefix = ">" if idx == selected else " "
+            line = (
+                f"{prefix}{e.sequence:8d}  {e.event_type:16s}  "
+                f"{e.timestamp}  {e.session_id}"
+            )
+            lines.append(line[:width_chars])
+
+        # Spacer and details title
+        lines.append("-" * width_chars)
+        detail_title = (
+            f"details seq={ev.sequence} type={ev.event_type} ts={ev.timestamp}"
+        )
+        lines.append(detail_title[:width_chars])
+
+        # JSON body
+        try:
+            parsed = json.loads(ev.raw_json)
+            if pretty:
+                raw = json.dumps(parsed, indent=2)
+            else:
+                raw = json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
+        except Exception:
+            raw = ev.raw_json
+
+        json_lines = raw.splitlines()
+        if wrap_long:
+            wrapped: list[str] = []
+            for line in json_lines:
+                if len(line) <= width_chars:
+                    wrapped.append(line)
+                else:
+                    wrapped.extend(
+                        textwrap.wrap(
+                            line,
+                            width=max(10, width_chars),
+                            break_long_words=False,
+                            replace_whitespace=False,
+                        )
+                    )
+            json_lines = wrapped
+
+        for line in json_lines:
+            if len(lines) >= height_lines:
+                break
+            lines.append(line[:width_chars])
+
+        # Pad to full height
+        while len(lines) < height_lines:
+            lines.append("")
+
+        # Render to image
+        img = Image.new("L", (img_w, img_h), color=0)  # grayscale
+        draw = ImageDraw.Draw(img)
+        y = 0
+        for line in lines[:height_lines]:
+            draw.text((0, y), line, font=font, fill=255)
+            y += char_h
+
+        frames.append(img)
+
+        if selected < len(events) - 1:
+            selected += 1
+        else:
+            break
+
+    if not frames:
+        print("ℹ️  No frames were generated for GIF.")
+        return
+
+    out_path = Path(gif_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    frames[0].save(
+        str(out_path),
+        save_all=True,
+        append_images=frames[1:],
+        duration=duration_ms,
+        loop=0,
+    )
+    print(f"✅ Saved trace replay GIF to {out_path}")
+
+
 def replay_curses(events: SeqType[TraceEvent], auto_delay: float) -> None:
     """Interactive curses-based replay UI."""
     if not events:
@@ -189,11 +336,11 @@ def replay_curses(events: SeqType[TraceEvent], auto_delay: float) -> None:
             session = events[0].session_id
             platform = events[0].platform
             status = (
-                f"Trace Replay | session={session} platform={platform} "
+                f"trace replay | session={session} platform={platform} "
                 f"| q:quit  j/k or ↑/↓:navigate  ←/h:slower  →/l:faster  "
-                f"SPACE:auto  delay={current_delay:.1f}s  "
-                f"W:wrap={'on' if wrap_long else 'off'}  "
-                f"R:render={'pretty' if pretty else 'compact'}"
+                f"space:auto  delay={current_delay:.1f}s  "
+                f"w:wrap={'on' if wrap_long else 'off'}  "
+                f"r:render={'pretty' if pretty else 'compact'}"
             )
             stdscr.addnstr(0, 0, status, w - 1, curses.A_BOLD)
 
@@ -340,6 +487,15 @@ def main() -> int:
         action="store_true",
         help="Disable curses UI and just print a summary of events.",
     )
+    parser.add_argument(
+        "--gif",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to write an animated GIF of the replay. "
+            "When provided, a GIF is generated instead of launching the curses UI."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -351,6 +507,14 @@ def main() -> int:
 
     if args.no_ui:
         print_events(events)
+        return 0
+
+    if args.gif:
+        generate_gif(
+            events,
+            gif_path=args.gif,
+            auto_delay=max(0.0, args.auto_delay),
+        )
         return 0
 
     replay_curses(events, auto_delay=max(0.0, args.auto_delay))
