@@ -72,50 +72,124 @@ if [[ "$CURRENT_BRANCH" == "develop" ]]; then
     fi
 fi
 
-# Step 2: Check for uncommitted changes
+# Step 2: Check for uncommitted changes and untracked files
 echo ""
-echo "📋 Step 1: Checking for uncommitted changes..."
-if ! git diff-index --quiet HEAD --; then
-    echo "   ⚠️  You have uncommitted changes:"
+echo "📋 Step 1: Checking for uncommitted changes and untracked files..."
+
+# Check for uncommitted changes (modified tracked files)
+HAS_UNCOMMITTED=$(git diff-index --quiet HEAD --; echo $?)
+
+# Check for untracked files
+UNTRACKED_FILES=$(git ls-files --others --exclude-standard)
+HAS_UNTRACKED=false
+if [[ -n "$UNTRACKED_FILES" ]]; then
+    HAS_UNTRACKED=true
+fi
+
+if [[ "$HAS_UNCOMMITTED" -eq 1 ]] || [[ "$HAS_UNTRACKED" == "true" ]]; then
+    echo "   ⚠️  You have changes:"
     git status --short
     
     if [[ "$SKIP_COMMIT" == "false" ]]; then
-        # Check if changes look like they should be committed
-        # Skip commit if all files are in .gitignore or are temporary files
-        CHANGED_FILES=$(git status --short | awk '{print $2}')
-        ALL_IGNORED=true
-        for file in $CHANGED_FILES; do
-            if ! git check-ignore -q "$file"; then
-                ALL_IGNORED=false
-                break
-            fi
-        done
+        # Analyze files to determine if they should be ignored
+        FILES_TO_IGNORE=()
+        FILES_TO_COMMIT=()
         
-        if [[ "$ALL_IGNORED" == "true" ]]; then
-            echo "   ℹ️  All changed files are ignored. Skipping commit."
-        else
+        if [[ "$HAS_UNTRACKED" == "true" ]]; then
+            while IFS= read -r file; do
+                # Check if file looks like it should be ignored
+                # Common patterns: temp files, logs, OS files, etc.
+                FILENAME=$(basename "$file")
+                if [[ "$FILENAME" =~ ^(\.DS_Store|\._.*|.*\.log|.*\.tmp|.*\.swp|.*~|.*\.bak)$ ]] || \
+                   [[ "$FILENAME" =~ ^(somestuff|test|temp|scratch|junk|.*\.test)$ ]] || \
+                   [[ -d "$file" && "$FILENAME" =~ ^(node_modules|__pycache__|\.pytest_cache|\.venv|venv|env)$ ]]; then
+                    FILES_TO_IGNORE+=("$file")
+                else
+                    FILES_TO_COMMIT+=("$file")
+                fi
+            done <<< "$UNTRACKED_FILES"
+        fi
+        
+        # Handle files that should be ignored
+        if [[ ${#FILES_TO_IGNORE[@]} -gt 0 ]]; then
+            echo ""
+            echo "   📋 Files detected that should probably be ignored:"
+            for file in "${FILES_TO_IGNORE[@]}"; do
+                echo "      - $file"
+            done
+            read -p "   Add these to .gitignore? (Y/n): " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+                for file in "${FILES_TO_IGNORE[@]}"; do
+                    # Add pattern to .gitignore
+                    if [[ -f "$file" ]]; then
+                        echo "$(basename "$file")" >> .gitignore
+                    elif [[ -d "$file" ]]; then
+                        echo "$(basename "$file")/" >> .gitignore
+                    fi
+                done
+                echo "   ✅ Added to .gitignore"
+                # Commit .gitignore update
+                git add .gitignore
+                git commit -m "chore: add files to .gitignore" >/dev/null 2>&1 || true
+            fi
+        fi
+        
+        # Check if there are still files to commit
+        if [[ "$HAS_UNCOMMITTED" -eq 1 ]] || [[ ${#FILES_TO_COMMIT[@]} -gt 0 ]]; then
+            # Generate a useful commit message based on changes
+            COMMIT_MSG=""
+            if [[ "$HAS_UNCOMMITTED" -eq 1 ]]; then
+                # Try to generate a meaningful commit message from diff
+                MODIFIED_FILES=$(git diff --name-only HEAD)
+                if echo "$MODIFIED_FILES" | grep -q "\.py$"; then
+                    COMMIT_MSG="refactor: update Python code"
+                elif echo "$MODIFIED_FILES" | grep -q "\.sh$"; then
+                    COMMIT_MSG="refactor: update scripts"
+                elif echo "$MODIFIED_FILES" | grep -q "\.md$"; then
+                    COMMIT_MSG="docs: update documentation"
+                elif echo "$MODIFIED_FILES" | grep -q "\.json$\|\.yaml$\|\.yml$"; then
+                    COMMIT_MSG="config: update configuration"
+                else
+                    COMMIT_MSG="chore: update files"
+                fi
+            elif [[ ${#FILES_TO_COMMIT[@]} -gt 0 ]]; then
+                # New files - try to infer type
+                FIRST_FILE="${FILES_TO_COMMIT[0]}"
+                if [[ "$FIRST_FILE" =~ \.(py)$ ]]; then
+                    COMMIT_MSG="feat: add Python module"
+                elif [[ "$FIRST_FILE" =~ \.(md)$ ]]; then
+                    COMMIT_MSG="docs: add documentation"
+                elif [[ "$FIRST_FILE" =~ \.(sh)$ ]]; then
+                    COMMIT_MSG="feat: add script"
+                else
+                    COMMIT_MSG="chore: add files"
+                fi
+            fi
+            
             # Auto-commit by default (Y), but allow override
             read -p "   Commit these changes? (Y/n): " -n 1 -r
             echo
             if [[ ! $REPLY =~ ^[Nn]$ ]]; then
                 echo "   📝 Enter commit message (or press Enter for default):"
-                read -r COMMIT_MSG
-                if [[ -z "$COMMIT_MSG" ]]; then
-                    COMMIT_MSG="WIP: $(date +%Y-%m-%d-%H%M%S)"
+                echo "   Default: $COMMIT_MSG"
+                read -r USER_COMMIT_MSG
+                if [[ -z "$USER_COMMIT_MSG" ]]; then
+                    USER_COMMIT_MSG="$COMMIT_MSG"
                 fi
                 
                 git add -A
-                git commit -m "$COMMIT_MSG"
+                git commit -m "$USER_COMMIT_MSG"
                 echo "   ✅ Changes committed"
             else
-                echo "   ⚠️  Skipping commit. Changes remain uncommitted."
+                echo "   ⚠️  Skipping commit. Changes remain uncommitted/untracked."
             fi
         fi
     else
         echo "   ⚠️  Skipping commit (--no-commit flag)"
     fi
 else
-    echo "   ✅ No uncommitted changes"
+    echo "   ✅ No uncommitted changes or untracked files"
 fi
 
 # Step 3: Check if branch needs pushing
