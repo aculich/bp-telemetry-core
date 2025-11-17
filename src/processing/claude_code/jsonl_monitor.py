@@ -88,11 +88,10 @@ class ClaudeCodeJSONLMonitor:
     async def start(self):
         """Start JSONL file monitoring."""
         self.running = True
-
-        # Start monitoring loop
-        asyncio.create_task(self._monitor_loop())
-
         logger.info("Claude Code JSONL monitor started")
+
+        # Run monitoring loop directly (blocks until stopped)
+        await self._monitor_loop()
 
     async def stop(self):
         """Stop JSONL file monitoring."""
@@ -101,10 +100,14 @@ class ClaudeCodeJSONLMonitor:
 
     async def _monitor_loop(self):
         """Main monitoring loop - polls every 30 seconds."""
+        logger.info(f"JSONL monitor loop starting, poll interval: {self.poll_interval}s")
         while self.running:
             try:
                 # Get active sessions from session monitor
                 active_sessions = self.session_monitor.get_active_sessions()
+
+                if active_sessions:
+                    logger.debug(f"Monitoring {len(active_sessions)} active sessions")
 
                 # Monitor each active session
                 for session_id, session_info in active_sessions.items():
@@ -133,6 +136,8 @@ class ClaudeCodeJSONLMonitor:
                 logger.warning(f"No project directory found for {workspace_path}")
                 return
 
+            logger.debug(f"Found project directory: {project_dir}")
+
             # On first monitoring, read the main session file
             if session_id not in self.monitored_sessions:
                 self.monitored_sessions.add(session_id)
@@ -140,9 +145,13 @@ class ClaudeCodeJSONLMonitor:
                 logger.info(f"Started monitoring session: {session_id}")
 
             # Monitor main session file
-            session_file = project_dir / "session.jsonl"
+            # Claude Code creates session files with the session_id as filename
+            session_file = project_dir / f"{session_id}.jsonl"
             if session_file.exists():
+                logger.info(f"Found session file: {session_file}")
                 await self._monitor_file(session_file, session_id, session_info)
+            else:
+                logger.debug(f"Session file not found: {session_file}")
 
             # Monitor agent files
             await self._monitor_agent_files(project_dir, session_id, session_info)
@@ -305,44 +314,26 @@ class ClaudeCodeJSONLMonitor:
         When a TOOL-USE event completes, check if toolUseResult contains agentId.
         If it's a new agent for this session, start monitoring that agent file.
         """
-        # Check for ASSISTANT events with tool_use content
-        if entry_data.get("type") != "ASSISTANT":
+        # Check for events with toolUseResult containing agentId
+        # In Claude Code JSONL, toolUseResult is at the top level of the event
+        tool_use_result = entry_data.get("toolUseResult", {})
+        if not isinstance(tool_use_result, dict):
             return
 
-        message = entry_data.get("message", {})
-        if not isinstance(message, dict):
+        agent_id = tool_use_result.get("agentId")
+        if not agent_id:
             return
 
-        content = message.get("content", [])
-        if not isinstance(content, list):
-            return
+        # Check if this is a new agent for this session
+        if session_id not in self.session_agents:
+            self.session_agents[session_id] = set()
 
-        # Look for tool_use items with toolUseResult containing agentId
-        for item in content:
-            if not isinstance(item, dict):
-                continue
+        if agent_id in self.session_agents[session_id]:
+            return  # Already monitoring this agent
 
-            if item.get("type") != "tool_use":
-                continue
-
-            tool_use_result = item.get("toolUseResult", {})
-            if not isinstance(tool_use_result, dict):
-                continue
-
-            agent_id = tool_use_result.get("agentId")
-            if not agent_id:
-                continue
-
-            # Check if this is a new agent for this session
-            if session_id not in self.session_agents:
-                self.session_agents[session_id] = set()
-
-            if agent_id in self.session_agents[session_id]:
-                continue  # Already monitoring this agent
-
-            # New agent detected!
-            self.session_agents[session_id].add(agent_id)
-            logger.info(f"Detected new agent for session {session_id}: {agent_id}")
+        # New agent detected!
+        self.session_agents[session_id].add(agent_id)
+        logger.info(f"Detected new agent for session {session_id}: {agent_id}")
 
     async def _monitor_agent_files(
         self,

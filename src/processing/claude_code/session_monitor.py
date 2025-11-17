@@ -45,10 +45,10 @@ class ClaudeCodeSessionMonitor:
         # Process historical events first (catch up on existing sessions)
         await self._catch_up_historical_events()
 
-        # Start Redis event listener
-        asyncio.create_task(self._listen_redis_events())
-
         logger.info("Claude Code session monitor started (Redis events only)")
+
+        # Run Redis event listener directly (blocks until stopped)
+        await self._listen_redis_events()
 
     async def _catch_up_historical_events(self):
         """Process all historical session_start events from Redis."""
