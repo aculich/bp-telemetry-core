@@ -336,6 +336,9 @@ def create_indexes(client: SQLiteClient) -> None:
         "CREATE INDEX IF NOT EXISTS idx_timestamp ON raw_traces(timestamp DESC);",
         "CREATE INDEX IF NOT EXISTS idx_conv_session ON conversations(session_id);",
         "CREATE INDEX IF NOT EXISTS idx_conv_platform_time ON conversations(platform, started_at DESC);",
+        # Index for Claude Code session recovery (active sessions query)
+        "CREATE INDEX IF NOT EXISTS idx_conv_platform_active ON conversations(platform, ended_at) WHERE ended_at IS NULL;",
+        "CREATE INDEX IF NOT EXISTS idx_conv_platform_started ON conversations(platform, started_at);",
         "CREATE INDEX IF NOT EXISTS idx_turn_conv ON conversation_turns(conversation_id, turn_number);",
         "CREATE INDEX IF NOT EXISTS idx_changes_conv ON code_changes(conversation_id);",
         "CREATE INDEX IF NOT EXISTS idx_changes_accepted ON code_changes(accepted, timestamp);",
