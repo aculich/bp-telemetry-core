@@ -24,6 +24,7 @@ from .fast_path.consumer import FastPathConsumer
 from .fast_path.cdc_publisher import CDCPublisher
 from .cursor.session_monitor import SessionMonitor
 from .cursor.database_monitor import CursorDatabaseMonitor
+from .cursor.markdown_monitor import CursorMarkdownMonitor
 from .claude_code.transcript_monitor import ClaudeCodeTranscriptMonitor
 from ..capture.shared.config import Config
 
@@ -59,6 +60,7 @@ class TelemetryServer:
         self.consumer: Optional[FastPathConsumer] = None
         self.session_monitor: Optional[SessionMonitor] = None
         self.cursor_monitor: Optional[CursorDatabaseMonitor] = None
+        self.markdown_monitor: Optional[CursorMarkdownMonitor] = None
         self.claude_code_monitor: Optional[ClaudeCodeTranscriptMonitor] = None
         self.running = False
         self.monitor_threads: list[threading.Thread] = []
@@ -157,6 +159,37 @@ class TelemetryServer:
 
         logger.info("Cursor database monitor initialized")
 
+    def _initialize_markdown_monitor(self) -> None:
+        """Initialize Cursor Markdown History monitor."""
+        # Check if markdown monitoring is enabled (default: True)
+        enabled = True  # TODO: Load from config
+
+        if not enabled:
+            logger.info("Cursor Markdown History monitoring is disabled")
+            return
+
+        # Require session monitor to be initialized
+        if not self.session_monitor:
+            logger.warning("Session monitor not initialized, cannot start Markdown monitor")
+            return
+
+        logger.info("Initializing Cursor Markdown History monitor")
+
+        # Create markdown monitor
+        # Use 2s debounce for dev/testing, 10s for normal operation
+        # TODO: Load from config
+        debounce_delay = 10.0  # Normal operation default
+        
+        self.markdown_monitor = CursorMarkdownMonitor(
+            session_monitor=self.session_monitor,
+            output_dir=None,  # Use default: workspace/.history/
+            poll_interval=120.0,  # 2-minute polling fallback
+            debounce_delay=debounce_delay,
+            query_timeout=1.5,
+        )
+
+        logger.info("Cursor Markdown History monitor initialized")
+
     def _initialize_claude_code_monitor(self) -> None:
         """Initialize Claude Code transcript monitor."""
         # Check if claude code monitoring is enabled (default: True)
@@ -195,6 +228,7 @@ class TelemetryServer:
             self._initialize_redis()
             self._initialize_consumer()
             self._initialize_cursor_monitor()
+            self._initialize_markdown_monitor()
             self._initialize_claude_code_monitor()
 
             # Start monitors in background threads (if enabled)
@@ -216,6 +250,19 @@ class TelemetryServer:
                 session_thread.start()
                 cursor_thread.start()
                 self.monitor_threads.extend([session_thread, cursor_thread])
+
+            # Start markdown monitor (if enabled)
+            if self.markdown_monitor:
+                def run_markdown_monitor():
+                    import asyncio
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(self.markdown_monitor.start())
+                
+                markdown_thread = threading.Thread(target=run_markdown_monitor, daemon=True)
+                markdown_thread.start()
+                self.monitor_threads.append(markdown_thread)
+                logger.info("Cursor Markdown History monitor started")
 
             if self.claude_code_monitor:
                 def run_claude_code_monitor():
@@ -267,6 +314,12 @@ class TelemetryServer:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(self.claude_code_monitor.stop())
+
+        if self.markdown_monitor:
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self.markdown_monitor.stop())
 
         if self.cursor_monitor:
             import asyncio
