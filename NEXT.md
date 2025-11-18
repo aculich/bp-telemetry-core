@@ -12,8 +12,13 @@
     - src/processing/cursor/markdown_writer.py — reads Cursor workspace `state.vscdb` and writes per-workspace Markdown
     - src/processing/cursor/markdown_monitor.py — watches Cursor DB changes (watchdog/poll) and triggers writes with debounce
     - src/processing/cursor/README_MARKDOWN.md — implementation summary and usage notes
-    - src/processing/server.py — integrates/starts the Markdown monitor alongside the telemetry server
-    - Workspace output path: <workspace>/.history/{workspace_hash}_{timestamp}.md (ensure .history exists)
+    - src/processing/server.py — integrates/starts the Markdown monitor alongside the main telemetry server
+    - src/processing/workspace_history_server.py — dedicated Workspace History server (Markdown + session monitors, optional DuckDB)
+    - scripts/start_server.py — starts the main telemetry processing server
+    - scripts/start_history_server.py — starts the Workspace History server
+    - Workspace output paths:
+        - Global history: ~/.blueplane/history/{workspace_hash}/{workspace_hash}_{timestamp}.md (current default)
+        - Workspace-local: <workspace>/.history/{workspace_hash}_{timestamp}.md (when configured to prefer workspace output)
 
 - Shared understanding
   - Your scripts currently read traces from Blueplane’s SQLite DB (not Cursor’s raw DB) and output via CLI/GIF browser.
@@ -64,11 +69,11 @@ Feature request style next steps
      - Create .history in a chosen workspace; start server; verify output.
   2) Server refactor foundation
      - New Python server module that:
-       - Reads from workspace DB + global DB.
-       - Initializes MarkdownMonitor in background thread.
-       - Centralizes workspace/session resolution and logging.
+       - Ensures global telemetry DB (~/.blueplane/telemetry.db) exists and is initialized.
+       - Initializes SessionMonitor and MarkdownMonitor in background threads.
+       - Centralizes workspace/session resolution and logging, and prefers a global history output dir by default.
   3) Config + paths
-     - Add config to prefer global output dir ~/.blueplane/history with per-workspace subdirs, fallback to workspace/.history.
+     - Add config/convention to prefer global output dir ~/.blueplane/history with per-workspace subdirs, fallback to workspace/.history.
   4) Data layer preparation
      - Add an adapter layer to optionally write to DuckDB; keep parity schema for future aggregation.
   5) Tests/validation
@@ -79,9 +84,9 @@ Feature request style next steps
 
 - Milestones
   - [X] M1: Local Markdown file generated from one workspace.
-  - [ ] M2: New server module reading workspace/global DBs with monitor integrated.
-  - [ ] M3: Configurable output location; logging for workspace/session mapping.
-  - [ ] M4: DuckDB sink scaffolded and behind flag.
+  - [X] M2: New server module reading workspace/global DBs with monitor integrated (WorkspaceHistoryServer + start_history_server.py).
+  - [X] M3: Configurable output location; logging for workspace/session mapping (global ~/.blueplane/history default with per-workspace subdirs; workspace/.history fallback).
+  - [ ] M4: DuckDB sink scaffolded and behind flag (DuckDBAdapter in src/processing/database/duckdb_adapter.py, gated by BLUEPLANE_HISTORY_USE_DUCKDB=1).
 
 - Risks/mitigations
   - Extension dependency ambiguity: log session→workspace map; fallback prompts.

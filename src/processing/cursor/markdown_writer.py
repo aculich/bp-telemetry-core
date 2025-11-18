@@ -10,6 +10,7 @@ Queries all relevant ItemTable keys and writes formatted markdown output to .his
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 from datetime import datetime
@@ -62,6 +63,7 @@ class CursorMarkdownWriter:
         """
         self.workspace_path = Path(workspace_path)
         self.use_utc = use_utc
+        self._last_data_hash: Optional[str] = None
         
         if output_dir:
             self.output_dir = Path(output_dir)
@@ -90,9 +92,15 @@ class CursorMarkdownWriter:
         try:
             # Load all trace-relevant data from ItemTable
             data = await self._load_database_data(db_path)
-            
+
             if not data:
                 logger.debug(f"No data found in database {db_path}")
+                return None
+
+            # Compute a stable hash of the current data to avoid redundant writes
+            current_hash = self._compute_data_hash(data)
+            if self._last_data_hash is not None and current_hash == self._last_data_hash:
+                logger.debug(f"No changes detected for workspace {workspace_hash}, skipping markdown write")
                 return None
 
             # Generate markdown from data
@@ -104,7 +112,9 @@ class CursorMarkdownWriter:
 
             # Write to file
             output_path = await self._write_markdown_file(markdown, workspace_hash)
-            
+            # Update last hash only after a successful write
+            self._last_data_hash = current_hash
+
             logger.info(f"Wrote markdown to {output_path}")
             return output_path
 
@@ -162,6 +172,24 @@ class CursorMarkdownWriter:
             logger.error(f"Error loading database data: {e}")
         
         return data
+
+    def _compute_data_hash(self, data: Dict[str, Any]) -> str:
+        """
+        Compute a stable hash for the loaded ItemTable data.
+
+        This lets us skip writing markdown files when nothing material has
+        changed since the last write for this workspace.
+        """
+        try:
+            # JSON-serialize with sorted keys for a stable representation
+            serialized = json.dumps(data, sort_keys=True, separators=(",", ":"))
+        except TypeError:
+            # Fallback: coerce non-serializable types to strings
+            safe_data = {k: (v if isinstance(v, (dict, list, str, int, float, bool, type(None))) else str(v))
+                         for k, v in data.items()}
+            serialized = json.dumps(safe_data, sort_keys=True, separators=(",", ":"))
+
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
     async def _generate_markdown(
         self,
@@ -236,6 +264,24 @@ class CursorMarkdownWriter:
             if history_markdown:
                 markdown_parts.append("## File History\n\n")
                 markdown_parts.append(history_markdown)
+                markdown_parts.append("\n\n")
+
+        # Process interactive sessions (high-level presence only for now)
+        interactive_sessions = data.get("interactive.sessions")
+        if interactive_sessions:
+            sessions_markdown = self._format_interactive_sessions(interactive_sessions)
+            if sessions_markdown:
+                markdown_parts.append("## Interactive Sessions\n\n")
+                markdown_parts.append(sessions_markdown)
+                markdown_parts.append("\n\n")
+
+        # Process workspace info (cursorAuth/workspaceOpenedDate)
+        workspace_opened = data.get("cursorAuth/workspaceOpenedDate")
+        if workspace_opened is not None:
+            workspace_markdown = self._format_workspace_info(workspace_opened)
+            if workspace_markdown:
+                markdown_parts.append("## Workspace Info\n\n")
+                markdown_parts.append(workspace_markdown)
                 markdown_parts.append("\n\n")
         
         return "".join(markdown_parts)
@@ -334,6 +380,9 @@ class CursorMarkdownWriter:
             parts.append(f"**Type:** {gen_type}\n")
             
             if description:
+                # Truncate very long descriptions for readability
+                if len(description) > 300:
+                    description = description[:297] + "..."
                 parts.append(f"**Description:** {description}\n")
             
             parts.append("\n---\n\n")
@@ -360,11 +409,59 @@ class CursorMarkdownWriter:
                 parts.append(f"**Command Type:** {command_type}\n")
             
             if text:
-                parts.append(f"**Text:**\n\n```\n{text}\n```\n")
+                # Truncate very long prompts to avoid huge markdown blocks
+                display_text = text
+                if len(display_text) > 600:
+                    display_text = display_text[:597] + "..."
+                parts.append(f"**Text:**\n\n```\n{display_text}\n```\n")
             
             parts.append("\n---\n\n")
         
         return "".join(parts)
+
+    def _format_interactive_sessions(self, sessions: Any) -> str:
+        """
+        Format interactive.sessions to markdown.
+
+        For now we keep this high-level, just indicating that session data exists.
+        """
+        try:
+            if isinstance(sessions, (dict, list)):
+                count = len(sessions) if isinstance(sessions, list) else 1
+                return f"- Interactive session data present ({count} record(s))\n"
+            # Fallback: just show that something is there
+            return "- Interactive session data present\n"
+        except Exception as e:
+            logger.warning(f"Failed to format interactive.sessions: {e}")
+            return ""
+
+    def _format_workspace_info(self, value: Any) -> str:
+        """
+        Format cursorAuth/workspaceOpenedDate to markdown.
+
+        The value is not always JSON; treat it as a raw timestamp or string.
+        """
+        try:
+            # If it's already a number (ms since epoch)
+            if isinstance(value, (int, float)):
+                dt = datetime.fromtimestamp(value / 1000.0)
+                return f"- Workspace opened: {self._format_timestamp(dt, self.use_utc)}\n"
+
+            # If it's a string, try to parse as integer timestamp first
+            if isinstance(value, str):
+                try:
+                    ts = int(value)
+                    dt = datetime.fromtimestamp(ts / 1000.0)
+                    return f"- Workspace opened: {self._format_timestamp(dt, self.use_utc)}\n"
+                except ValueError:
+                    # Not a pure timestamp; just echo the string
+                    return f"- Workspace opened (raw): {value}\n"
+
+            # Fallback: stringify other types
+            return f"- Workspace opened (raw): {value}\n"
+        except Exception as e:
+            logger.warning(f"Failed to format workspaceOpenedDate: {e}")
+            return ""
 
     def _format_background_composer(self, bg_composer: Dict[str, Any]) -> str:
         """Format background composer data to markdown."""

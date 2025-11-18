@@ -94,6 +94,8 @@ class CursorMarkdownMonitor:
         workspace_mapper: Optional[WorkspaceMapper] = None,
         poll_interval: float = 120.0,  # 2 minutes safety net (like example)
         use_utc: bool = True,
+        global_output_dir: Optional[Path] = None,
+        prefer_global_output: bool = False,
     ):
         """
         Initialize markdown monitor.
@@ -108,6 +110,10 @@ class CursorMarkdownMonitor:
         self.workspace_mapper = workspace_mapper or WorkspaceMapper(session_monitor)
         self.poll_interval = poll_interval
         self.use_utc = use_utc
+
+        # Output configuration
+        self.global_output_dir: Optional[Path] = global_output_dir
+        self.prefer_global_output = prefer_global_output
         
         # Track markdown writers per workspace
         self.writers: Dict[str, CursorMarkdownWriter] = {}
@@ -245,8 +251,10 @@ class CursorMarkdownMonitor:
             # Get or create writer for workspace
             if workspace_hash not in self.writers:
                 workspace_path_obj = Path(workspace_path) if workspace_path else db_path.parent.parent
+                output_dir = self._get_output_dir(workspace_hash, workspace_path_obj)
                 self.writers[workspace_hash] = CursorMarkdownWriter(
                     workspace_path_obj,
+                    output_dir=output_dir,
                     use_utc=self.use_utc
                 )
             
@@ -259,7 +267,23 @@ class CursorMarkdownMonitor:
                 logger.info(f"Wrote markdown: {output_path}")
             else:
                 logger.debug(f"No markdown written for {db_path} (no data)")
-                
+
         except Exception as e:
             logger.error(f"Error writing markdown for {db_path}: {e}")
+
+    def _get_output_dir(self, workspace_hash: str, workspace_path_obj: Path) -> Path:
+        """
+        Determine the output directory for a workspace's markdown files.
+
+        If a global output directory is configured and preferred, use:
+            <global_output_dir>/<workspace_hash>
+
+        Otherwise, default to:
+            <workspace_path>/.history
+        """
+        if self.global_output_dir and self.prefer_global_output:
+            return self.global_output_dir / workspace_hash
+
+        # Default: workspace-local .history directory
+        return workspace_path_obj / ".history"
 
