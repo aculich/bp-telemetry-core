@@ -86,7 +86,7 @@ Feature request style next steps
   - [X] M1: Local Markdown file generated from one workspace.
   - [X] M2: New server module reading workspace/global DBs with monitor integrated (WorkspaceHistoryServer + start_history_server.py).
   - [X] M3: Configurable output location; logging for workspace/session mapping (global ~/.blueplane/history default with per-workspace subdirs; workspace/.history fallback).
-  - [ ] M4: DuckDB sink scaffolded and behind flag (DuckDBAdapter in src/processing/database/duckdb_adapter.py, gated by BLUEPLANE_HISTORY_USE_DUCKDB=1).
+- [X] M4: DuckDB sink scaffolded and behind flag (DuckDBAdapter in src/processing/database/duckdb_adapter.py, gated by BLUEPLANE_HISTORY_USE_DUCKDB=1).
 
 - Risks/mitigations
   - Extension dependency ambiguity: log session→workspace map; fallback prompts.
