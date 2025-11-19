@@ -23,7 +23,7 @@ import redis
 from .session_monitor import ClaudeCodeSessionMonitor
 from .jsonl_offset_store import JSONLOffsetStore
 from ..database.sqlite_client import SQLiteClient
-from ...capture.shared.project_utils import derive_project_name
+from ...capture.shared.project_utils import derive_project_name, recover_workspace_path_from_slug
 
 logger = logging.getLogger(__name__)
 
@@ -244,14 +244,8 @@ class ClaudeCodeJSONLMonitor:
 
                 logger.debug(f"Found session file at {session_file}")
 
-                # Try to extract workspace from project directory name
-                # Directory names like: -Users-bbalaran-Dev-sierra-blueplane-bp-telemetry-core
-                dir_name = project_dir.name
-                if dir_name.startswith("-"):
-                    dir_name = dir_name[1:]  # Remove leading dash
-
-                # Convert dashes back to slashes for path
-                workspace_path = "/" + dir_name.replace("-", "/")
+        # Try to recover workspace path from project slug
+        workspace_path = recover_workspace_path_from_slug(project_dir) or ""
 
                 # Validate by reading first few lines of JSONL to confirm
                 try:

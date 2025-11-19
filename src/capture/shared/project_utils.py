@@ -55,6 +55,50 @@ def derive_project_name(
     return name
 
 
-__all__ = ["derive_project_name"]
+def recover_workspace_path_from_slug(project_dir: Path) -> Optional[str]:
+    """
+    Recover an absolute workspace path from a Claude project directory slug.
+
+    Claude stores workspaces under ~/.claude/projects with directory names
+    like -Users-user-Dev-project-name where path separators are replaced with
+    hyphens. This helper attempts to reconstruct the original path while
+    preserving legitimate hyphens in directory names by probing the real
+    filesystem structure.
+    """
+    if not project_dir:
+        return None
+
+    slug = project_dir.name.lstrip("-")
+    if not slug:
+        return None
+
+    tokens = slug.split("-")
+    current_path = Path("/")
+    idx = 0
+
+    while idx < len(tokens):
+        candidate = tokens[idx]
+        next_idx = idx + 1
+        candidate_path = current_path / candidate
+
+        # Merge subsequent tokens until we find a real directory path or exhaust tokens
+        while not candidate_path.exists() and next_idx < len(tokens):
+            candidate = f"{candidate}-{tokens[next_idx]}"
+            next_idx += 1
+            candidate_path = current_path / candidate
+
+        if candidate_path.exists():
+            current_path = candidate_path
+            idx = next_idx
+        else:
+            # No matching directory on disk; append remaining tokens as-is
+            remaining = "-".join(tokens[idx:])
+            current_path = current_path / remaining
+            idx = len(tokens)
+
+    return str(current_path)
+
+
+__all__ = ["derive_project_name", "recover_workspace_path_from_slug"]
 
 

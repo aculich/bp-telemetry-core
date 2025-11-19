@@ -20,6 +20,8 @@ from ..database.sqlite_client import SQLiteClient
 
 logger = logging.getLogger(__name__)
 
+CLAUDE_PROJECTS_BASE = Path.home() / ".claude" / "projects"
+
 
 def _extract_workspace_name(workspace_path: str) -> str:
     """
@@ -52,6 +54,75 @@ def _extract_workspace_name(workspace_path: str) -> str:
         # Fallback: try to extract manually
         parts = workspace_path.replace('\\', '/').rstrip('/').split('/')
         return parts[-1] if parts else ""
+
+
+def _extract_workspace_path_from_jsonl(session_id: str) -> Optional[str]:
+    """
+    Inspect the Claude JSONL file for a session to locate a cwd/workspace path.
+    """
+    jsonl_path = _find_session_jsonl_file(session_id)
+    if not jsonl_path:
+        return None
+
+    try:
+        with open(jsonl_path, 'r', encoding='utf-8') as f:
+            for _ in range(25):
+                line = f.readline()
+                if not line:
+                    break
+
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                path = _extract_path_from_entry(entry)
+                if path:
+                    logger.debug(f"Derived workspace path from JSONL for session {session_id}: {path}")
+                    return path
+    except Exception as e:
+        logger.debug(f"Failed to read JSONL for session {session_id}: {e}")
+
+    return None
+
+
+def _find_session_jsonl_file(session_id: str) -> Optional[Path]:
+    """Locate the session JSONL file within ~/.claude/projects."""
+    if not CLAUDE_PROJECTS_BASE.exists():
+        return None
+
+    try:
+        for project_dir in CLAUDE_PROJECTS_BASE.iterdir():
+            if not project_dir.is_dir():
+                continue
+            candidate = project_dir / f"{session_id}.jsonl"
+            if candidate.exists():
+                return candidate
+    except Exception as e:
+        logger.debug(f"Failed scanning Claude projects for session {session_id}: {e}")
+
+    return None
+
+
+def _extract_path_from_entry(entry: dict) -> Optional[str]:
+    """Fetch a workspace/cwd path from a JSONL entry."""
+    for key in ('cwd', 'workspace', 'workspace_path'):
+        value = entry.get(key)
+        if isinstance(value, str) and value:
+            return value
+
+    metadata = entry.get('metadata', {})
+    if isinstance(metadata, dict):
+        for key in ('cwd', 'workspace', 'workspace_path'):
+            value = metadata.get(key)
+            if isinstance(value, str) and value:
+                return value
+
+    return None
 
 
 class SessionPersistence:
@@ -93,12 +164,21 @@ class SessionPersistence:
             conversation_id = str(uuid.uuid4())
             external_session_id = session_id
             
-            # Extract human-readable workspace name
-            workspace_name = _extract_workspace_name(workspace_path)
+            # Try to read workspace path/name directly from JSONL (cwd)
+            jsonl_workspace_path = _extract_workspace_path_from_jsonl(session_id)
+
+            effective_workspace_path = workspace_path or jsonl_workspace_path or ''
+
+            # Extract human-readable workspace name (prefer JSONL cwd)
+            workspace_name = _extract_workspace_name(jsonl_workspace_path or '')
+            if not workspace_name:
+                workspace_name = _extract_workspace_name(workspace_path)
+            if not workspace_name:
+                workspace_name = metadata.get('workspace_name') or metadata.get('project_name') or ''
             
             # Prepare context and metadata JSON
             context = {
-                'workspace_path': workspace_path,
+                'workspace_path': effective_workspace_path,
                 'workspace_hash': workspace_hash,
                 'workspace_name': workspace_name,
             }
@@ -107,7 +187,7 @@ class SessionPersistence:
                 'source': metadata.get('source', 'hooks'),
                 'started_via': 'session_start_hook',
                 'workspace_name': workspace_name,
-                'workspace_path': workspace_path,
+                'workspace_path': effective_workspace_path,
                 'workspace_hash': workspace_hash,
                 **metadata
             }
