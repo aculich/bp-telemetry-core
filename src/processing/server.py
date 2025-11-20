@@ -80,8 +80,57 @@ class TelemetryServer:
         # Initialize database with optimal settings
         self.sqlite_client.initialize_database()
         
-        # Create schema
-        create_schema(self.sqlite_client)
+        # Check schema version and migrate if needed
+        from src.processing.database.schema import get_schema_version, migrate_schema, SCHEMA_VERSION
+        current_version = get_schema_version(self.sqlite_client)
+        
+        # Check if conversations table exists with old schema (external_session_id column)
+        needs_migration = False
+        if current_version is None:
+            # Check if database has old schema by looking for conversations table with external_session_id
+            try:
+                with self.sqlite_client.get_connection() as conn:
+                    cursor = conn.execute("""
+                        SELECT name FROM sqlite_master 
+                        WHERE type='table' AND name='conversations'
+                    """)
+                    if cursor.fetchone():
+                        # Table exists, check for old column
+                        cursor = conn.execute("PRAGMA table_info(conversations)")
+                        columns = [row[1] for row in cursor.fetchall()]
+                        if 'external_session_id' in columns and 'external_id' not in columns:
+                            # Old schema detected
+                            needs_migration = True
+                            logger.info("Detected old schema (external_session_id), will migrate")
+            except Exception as e:
+                logger.debug(f"Error checking schema: {e}")
+        
+        if current_version is None and not needs_migration:
+            # First time setup - create schema
+            logger.info("Creating database schema...")
+            create_schema(self.sqlite_client)
+            
+            # Set schema version
+            self.sqlite_client.execute(
+                "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)"
+            )
+            self.sqlite_client.execute(
+                "INSERT INTO schema_version (version) VALUES (?)",
+                (SCHEMA_VERSION,)
+            )
+            logger.info(f"Database schema created (version {SCHEMA_VERSION})")
+        elif current_version is None and needs_migration:
+            # Old schema detected but no version recorded - assume version 1
+            logger.info("Detected unversioned database with old schema, migrating from version 1")
+            migrate_schema(self.sqlite_client, 1, SCHEMA_VERSION)
+        elif current_version < SCHEMA_VERSION:
+            # Migration needed
+            logger.info(f"Migrating schema from version {current_version} to {SCHEMA_VERSION}")
+            migrate_schema(self.sqlite_client, current_version, SCHEMA_VERSION)
+        else:
+            # Ensure schema exists (for new tables)
+            create_schema(self.sqlite_client)
+            logger.info(f"Database schema is up to date (version {current_version})")
         
         # Create writer
         self.sqlite_writer = SQLiteBatchWriter(self.sqlite_client)
@@ -151,8 +200,11 @@ class TelemetryServer:
 
         logger.info("Initializing Cursor database monitor")
 
-        # Create session monitor
-        self.session_monitor = SessionMonitor(self.redis_client)
+        # Create session monitor (with database persistence)
+        self.session_monitor = SessionMonitor(
+            redis_client=self.redis_client,
+            sqlite_client=self.sqlite_client
+        )
 
         # Create database monitor
         self.cursor_monitor = CursorDatabaseMonitor(

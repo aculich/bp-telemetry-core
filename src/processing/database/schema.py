@@ -16,7 +16,7 @@ from .sqlite_client import SQLiteClient
 logger = logging.getLogger(__name__)
 
 # Schema version for migrations
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def create_raw_traces_table(client: SQLiteClient) -> None:
@@ -72,9 +72,49 @@ def create_raw_traces_table(client: SQLiteClient) -> None:
     logger.info("Created raw_traces table")
 
 
+def create_cursor_sessions_table(client: SQLiteClient) -> None:
+    """
+    Create cursor_sessions table for Cursor IDE window sessions.
+
+    Only Cursor has sessions (IDE window instances). Claude Code has no session concept.
+
+    Args:
+        client: SQLiteClient instance
+    """
+    sql = """
+    CREATE TABLE IF NOT EXISTS cursor_sessions (
+        id TEXT PRIMARY KEY,
+        external_session_id TEXT NOT NULL UNIQUE,
+        workspace_hash TEXT NOT NULL,
+        workspace_name TEXT,
+        workspace_path TEXT,
+        started_at TIMESTAMP NOT NULL,
+        ended_at TIMESTAMP,
+        metadata TEXT DEFAULT '{}'
+    );
+    """
+    client.execute(sql)
+    
+    # Create indexes
+    indexes = [
+        "CREATE INDEX IF NOT EXISTS idx_cursor_sessions_workspace ON cursor_sessions(workspace_hash);",
+        "CREATE INDEX IF NOT EXISTS idx_cursor_sessions_time ON cursor_sessions(started_at DESC);",
+        "CREATE INDEX IF NOT EXISTS idx_cursor_sessions_external ON cursor_sessions(external_session_id);",
+    ]
+    
+    for index_sql in indexes:
+        client.execute(index_sql)
+    
+    logger.info("Created cursor_sessions table")
+
+
 def create_conversations_table(client: SQLiteClient) -> None:
     """
     Create conversations table for structured conversation data.
+
+    Schema supports both platforms:
+    - Claude Code: session_id is NULL (no session concept)
+    - Cursor: session_id references cursor_sessions.id
 
     Args:
         client: SQLiteClient instance
@@ -82,8 +122,8 @@ def create_conversations_table(client: SQLiteClient) -> None:
     sql = """
     CREATE TABLE IF NOT EXISTS conversations (
         id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        external_session_id TEXT NOT NULL,
+        session_id TEXT,
+        external_id TEXT NOT NULL,
         platform TEXT NOT NULL,
         workspace_hash TEXT,
         workspace_name TEXT,
@@ -102,7 +142,16 @@ def create_conversations_table(client: SQLiteClient) -> None:
         total_tokens INTEGER DEFAULT 0,
         total_changes INTEGER DEFAULT 0,
 
-        UNIQUE(external_session_id, platform)
+        -- Foreign key constraint (only enforced when session_id IS NOT NULL)
+        FOREIGN KEY (session_id) REFERENCES cursor_sessions(id),
+        
+        -- Data integrity constraint
+        CHECK (
+            (platform = 'cursor' AND session_id IS NOT NULL) OR
+            (platform = 'claude_code' AND session_id IS NULL)
+        ),
+        
+        UNIQUE(external_id, platform)
     );
     """
     client.execute(sql)
@@ -377,24 +426,57 @@ def create_indexes(client: SQLiteClient) -> None:
     Args:
         client: SQLiteClient instance
     """
+    # Check if conversations table has new schema (external_id) or old schema (external_session_id)
+    has_new_schema = True
+    try:
+        with client.get_connection() as conn:
+            cursor = conn.execute("PRAGMA table_info(conversations)")
+            columns = [row[1] for row in cursor.fetchall()]
+            if 'external_session_id' in columns and 'external_id' not in columns:
+                has_new_schema = False
+    except Exception:
+        # Table doesn't exist yet, will be created with new schema
+        pass
+    
     indexes = [
         "CREATE INDEX IF NOT EXISTS idx_session_time ON raw_traces(session_id, timestamp);",
         "CREATE INDEX IF NOT EXISTS idx_event_type_time ON raw_traces(event_type, timestamp);",
         "CREATE INDEX IF NOT EXISTS idx_date_hour ON raw_traces(event_date, event_hour);",
         "CREATE INDEX IF NOT EXISTS idx_timestamp ON raw_traces(timestamp DESC);",
         "CREATE INDEX IF NOT EXISTS idx_project_name ON raw_traces(project_name);",
-        "CREATE INDEX IF NOT EXISTS idx_conv_session ON conversations(session_id);",
-        "CREATE INDEX IF NOT EXISTS idx_conv_platform_time ON conversations(platform, started_at DESC);",
-        # Index for Claude Code session recovery (active sessions query)
-        "CREATE INDEX IF NOT EXISTS idx_conv_platform_active ON conversations(platform, ended_at) WHERE ended_at IS NULL;",
-        "CREATE INDEX IF NOT EXISTS idx_conv_platform_started ON conversations(platform, started_at);",
+    ]
+    
+    # Only create conversation indexes if table has new schema
+    if has_new_schema:
+        indexes.extend([
+            # Partial index for Cursor conversations (session_id is NULL for Claude)
+            "CREATE INDEX IF NOT EXISTS idx_conversations_session_cursor ON conversations(session_id) WHERE platform = 'cursor';",
+            "CREATE INDEX IF NOT EXISTS idx_conversations_external ON conversations(external_id, platform);",
+            "CREATE INDEX IF NOT EXISTS idx_conv_platform_time ON conversations(platform, started_at DESC);",
+            # Index for Claude Code session recovery (active sessions query)
+            "CREATE INDEX IF NOT EXISTS idx_conv_platform_active ON conversations(platform, ended_at) WHERE ended_at IS NULL;",
+            "CREATE INDEX IF NOT EXISTS idx_conv_platform_started ON conversations(platform, started_at);",
+            "CREATE INDEX IF NOT EXISTS idx_conversations_workspace ON conversations(workspace_hash) WHERE workspace_hash IS NOT NULL;",
+        ])
+    else:
+        # Old schema indexes (for backward compatibility during migration)
+        indexes.extend([
+            "CREATE INDEX IF NOT EXISTS idx_conv_session ON conversations(session_id);",
+            "CREATE INDEX IF NOT EXISTS idx_conv_platform_time ON conversations(platform, started_at DESC);",
+        ])
+    
+    indexes.extend([
         "CREATE INDEX IF NOT EXISTS idx_turn_conv ON conversation_turns(conversation_id, turn_number);",
         "CREATE INDEX IF NOT EXISTS idx_changes_conv ON code_changes(conversation_id);",
         "CREATE INDEX IF NOT EXISTS idx_changes_accepted ON code_changes(accepted, timestamp);",
-    ]
+    ])
 
     for index_sql in indexes:
-        client.execute(index_sql)
+        try:
+            client.execute(index_sql)
+        except Exception as e:
+            # Log but don't fail - index creation is best effort
+            logger.debug(f"Could not create index: {e}")
 
     logger.info("Created database indexes")
 
@@ -408,10 +490,11 @@ def create_schema(client: SQLiteClient) -> None:
     """
     logger.info("Creating database schema...")
 
-    # Create tables
+    # Create tables (cursor_sessions must be created before conversations due to FK)
     create_raw_traces_table(client)
     create_claude_raw_traces_table(client)
     create_claude_jsonl_offsets_table(client)
+    create_cursor_sessions_table(client)
     create_conversations_table(client)
     create_conversation_turns_table(client)
     create_code_changes_table(client)
@@ -472,9 +555,303 @@ def migrate_schema(client: SQLiteClient, from_version: int, to_version: int) -> 
         """
     )
 
-    # For now, just recreate schema (future: add incremental migrations)
+    # Incremental migrations
     if from_version < to_version:
-        create_schema(client)
+        if from_version < 2:
+            migrate_to_v2(client)
+            from_version = 2
+        
+        # Future migrations can be added here
+        # if from_version < 3:
+        #     migrate_to_v3(client)
+        #     from_version = 3
+        
         client.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (to_version,))
         logger.info(f"Schema migrated to version {to_version}")
+
+
+def migrate_to_v2(client: SQLiteClient) -> None:
+    """
+    Migrate schema to version 2: Add cursor_sessions table and update conversations table.
+    
+    Migration steps:
+    1. Create cursor_sessions table
+    2. Migrate existing Cursor sessions from conversations to cursor_sessions
+    3. Create new conversations table with updated schema
+    4. Migrate conversation data with updated references
+    5. Create new indexes
+    
+    Args:
+        client: SQLiteClient instance
+    """
+    logger.info("Starting migration to schema version 2...")
+    
+    import json
+    import uuid
+    from datetime import datetime
+    
+    try:
+        with client.get_connection() as conn:
+            # Enable foreign keys
+            conn.execute("PRAGMA foreign_keys = ON")
+            
+            # Step 1: Create cursor_sessions table
+            logger.info("Step 1: Creating cursor_sessions table...")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS cursor_sessions (
+                    id TEXT PRIMARY KEY,
+                    external_session_id TEXT NOT NULL UNIQUE,
+                    workspace_hash TEXT NOT NULL,
+                    workspace_name TEXT,
+                    workspace_path TEXT,
+                    started_at TIMESTAMP NOT NULL,
+                    ended_at TIMESTAMP,
+                    metadata TEXT DEFAULT '{}'
+                )
+            """)
+            
+            # Create cursor_sessions indexes
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_cursor_sessions_workspace ON cursor_sessions(workspace_hash);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_cursor_sessions_time ON cursor_sessions(started_at DESC);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_cursor_sessions_external ON cursor_sessions(external_session_id);")
+            
+            # Step 2: Check if conversations table exists and has old schema
+            cursor = conn.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name='conversations'
+            """)
+            table_exists = cursor.fetchone() is not None
+            
+            if not table_exists:
+                # Table doesn't exist, just create new schema
+                logger.info("Conversations table doesn't exist, creating new schema...")
+                conn.execute("""
+                    CREATE TABLE conversations (
+                        id TEXT PRIMARY KEY,
+                        session_id TEXT,
+                        external_id TEXT NOT NULL,
+                        platform TEXT NOT NULL,
+                        workspace_hash TEXT,
+                        workspace_name TEXT,
+                        started_at TIMESTAMP NOT NULL,
+                        ended_at TIMESTAMP,
+                        context TEXT DEFAULT '{}',
+                        metadata TEXT DEFAULT '{}',
+                        tool_sequence TEXT DEFAULT '[]',
+                        acceptance_decisions TEXT DEFAULT '[]',
+                        interaction_count INTEGER DEFAULT 0,
+                        acceptance_rate REAL,
+                        total_tokens INTEGER DEFAULT 0,
+                        total_changes INTEGER DEFAULT 0,
+                        FOREIGN KEY (session_id) REFERENCES cursor_sessions(id),
+                        CHECK (
+                            (platform = 'cursor' AND session_id IS NOT NULL) OR
+                            (platform = 'claude_code' AND session_id IS NULL)
+                        ),
+                        UNIQUE(external_id, platform)
+                    )
+                """)
+                conn.commit()
+                logger.info("Migration to v2 complete (new database)")
+                return
+            
+            # Check if migration already done (check for external_id column)
+            cursor = conn.execute("PRAGMA table_info(conversations)")
+            columns = [row[1] for row in cursor.fetchall()]
+            has_external_id = 'external_id' in columns
+            has_external_session_id = 'external_session_id' in columns
+            
+            if has_external_id and not has_external_session_id:
+                logger.info("Schema already migrated to v2, skipping migration")
+                return
+            
+            if not has_external_session_id:
+                logger.warning("Conversations table exists but doesn't have expected columns, creating new schema")
+                conn.execute("DROP TABLE IF EXISTS conversations")
+                conn.execute("""
+                    CREATE TABLE conversations (
+                        id TEXT PRIMARY KEY,
+                        session_id TEXT,
+                        external_id TEXT NOT NULL,
+                        platform TEXT NOT NULL,
+                        workspace_hash TEXT,
+                        workspace_name TEXT,
+                        started_at TIMESTAMP NOT NULL,
+                        ended_at TIMESTAMP,
+                        context TEXT DEFAULT '{}',
+                        metadata TEXT DEFAULT '{}',
+                        tool_sequence TEXT DEFAULT '[]',
+                        acceptance_decisions TEXT DEFAULT '[]',
+                        interaction_count INTEGER DEFAULT 0,
+                        acceptance_rate REAL,
+                        total_tokens INTEGER DEFAULT 0,
+                        total_changes INTEGER DEFAULT 0,
+                        FOREIGN KEY (session_id) REFERENCES cursor_sessions(id),
+                        CHECK (
+                            (platform = 'cursor' AND session_id IS NOT NULL) OR
+                            (platform = 'claude_code' AND session_id IS NULL)
+                        ),
+                        UNIQUE(external_id, platform)
+                    )
+                """)
+                conn.commit()
+                logger.info("Migration to v2 complete (recreated table)")
+                return
+            
+            # Step 3: Migrate Cursor sessions from conversations to cursor_sessions
+            logger.info("Step 2: Migrating Cursor sessions...")
+            cursor = conn.execute("""
+                SELECT DISTINCT
+                    external_session_id,
+                    workspace_hash,
+                    workspace_name,
+                    MIN(started_at) as started_at,
+                    MAX(ended_at) as ended_at,
+                    json_extract(context, '$.workspace_path') as workspace_path
+                FROM conversations
+                WHERE platform = 'cursor'
+                GROUP BY external_session_id, workspace_hash
+            """)
+            
+            session_mapping = {}  # external_session_id -> new internal session_id
+            cursor_sessions_data = []
+            
+            for row in cursor.fetchall():
+                external_session_id = row[0]
+                workspace_hash = row[1] or ''
+                workspace_name = row[2]
+                started_at = row[3]
+                ended_at = row[4]
+                workspace_path = row[5] or ''
+                
+                # Generate new internal session ID
+                internal_session_id = str(uuid.uuid4())
+                session_mapping[external_session_id] = internal_session_id
+                
+                cursor_sessions_data.append((
+                    internal_session_id,
+                    external_session_id,
+                    workspace_hash,
+                    workspace_name,
+                    workspace_path,
+                    started_at,
+                    ended_at,
+                    json.dumps({})  # metadata
+                ))
+            
+            if cursor_sessions_data:
+                conn.executemany("""
+                    INSERT OR IGNORE INTO cursor_sessions 
+                    (id, external_session_id, workspace_hash, workspace_name, workspace_path, started_at, ended_at, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, cursor_sessions_data)
+                logger.info(f"Migrated {len(cursor_sessions_data)} Cursor sessions")
+            
+            # Step 4: Create new conversations table
+            logger.info("Step 3: Creating new conversations table schema...")
+            conn.execute("""
+                CREATE TABLE conversations_new (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT,
+                    external_id TEXT NOT NULL,
+                    platform TEXT NOT NULL,
+                    workspace_hash TEXT,
+                    workspace_name TEXT,
+                    started_at TIMESTAMP NOT NULL,
+                    ended_at TIMESTAMP,
+                    context TEXT DEFAULT '{}',
+                    metadata TEXT DEFAULT '{}',
+                    tool_sequence TEXT DEFAULT '[]',
+                    acceptance_decisions TEXT DEFAULT '[]',
+                    interaction_count INTEGER DEFAULT 0,
+                    acceptance_rate REAL,
+                    total_tokens INTEGER DEFAULT 0,
+                    total_changes INTEGER DEFAULT 0,
+                    FOREIGN KEY (session_id) REFERENCES cursor_sessions(id),
+                    CHECK (
+                        (platform = 'cursor' AND session_id IS NOT NULL) OR
+                        (platform = 'claude_code' AND session_id IS NULL)
+                    ),
+                    UNIQUE(external_id, platform)
+                )
+            """)
+            
+            # Step 5: Migrate conversation data
+            logger.info("Step 4: Migrating conversation data...")
+            cursor = conn.execute("SELECT * FROM conversations")
+            old_columns = [desc[0] for desc in cursor.description]
+            
+            migrated_count = 0
+            for row in cursor.fetchall():
+                row_dict = dict(zip(old_columns, row))
+                conversation_id = row_dict['id']
+                platform = row_dict['platform']
+                external_session_id = row_dict.get('external_session_id', '')
+                
+                # Determine session_id and external_id
+                if platform == 'cursor':
+                    # Look up new internal session_id
+                    new_session_id = session_mapping.get(external_session_id)
+                    if not new_session_id:
+                        logger.warning(f"No session mapping found for {external_session_id}, skipping conversation {conversation_id}")
+                        continue
+                    external_id = external_session_id  # For now, use external_session_id as external_id
+                else:
+                    # Claude Code: session_id is NULL, external_id is the session/conversation ID
+                    new_session_id = None
+                    external_id = external_session_id or conversation_id
+            
+                # Insert into new table
+                try:
+                    conn.execute("""
+                        INSERT INTO conversations_new (
+                            id, session_id, external_id, platform,
+                            workspace_hash, workspace_name, started_at, ended_at,
+                            context, metadata, tool_sequence, acceptance_decisions,
+                            interaction_count, acceptance_rate, total_tokens, total_changes
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        conversation_id,
+                        new_session_id,
+                        external_id,
+                        platform,
+                        row_dict.get('workspace_hash'),
+                        row_dict.get('workspace_name'),
+                        row_dict.get('started_at'),
+                        row_dict.get('ended_at'),
+                        row_dict.get('context', '{}'),
+                        row_dict.get('metadata', '{}'),
+                        row_dict.get('tool_sequence', '[]'),
+                        row_dict.get('acceptance_decisions', '[]'),
+                        row_dict.get('interaction_count', 0),
+                        row_dict.get('acceptance_rate'),
+                        row_dict.get('total_tokens', 0),
+                        row_dict.get('total_changes', 0),
+                    ))
+                    migrated_count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to migrate conversation {conversation_id}: {e}")
+            
+            logger.info(f"Migrated {migrated_count} conversations")
+            
+            # Step 6: Replace old table with new table
+            logger.info("Step 5: Replacing conversations table...")
+            conn.execute("DROP TABLE conversations")
+            conn.execute("ALTER TABLE conversations_new RENAME TO conversations")
+            
+            # Step 7: Create indexes
+            logger.info("Step 6: Creating indexes...")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_session_cursor ON conversations(session_id) WHERE platform = 'cursor';")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_external ON conversations(external_id, platform);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_platform_time ON conversations(platform, started_at DESC);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_platform_active ON conversations(platform, ended_at) WHERE ended_at IS NULL;")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_platform_started ON conversations(platform, started_at);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_workspace ON conversations(workspace_hash) WHERE workspace_hash IS NOT NULL;")
+            
+            conn.commit()
+            logger.info("Migration to v2 complete successfully")
+            
+    except Exception as e:
+        logger.error(f"Migration to v2 failed: {e}", exc_info=True)
+        raise
 

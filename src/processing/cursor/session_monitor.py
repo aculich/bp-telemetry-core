@@ -6,48 +6,97 @@
 Session Monitor for Cursor workspaces.
 
 Listens to Redis session_start/end events from the extension.
+Provides persistent session management with database-backed recovery.
 """
 
 import asyncio
 import json
 import logging
+import threading
 from typing import Dict, Optional
 import redis
+
+from .session_persistence import CursorSessionPersistence
+from ..database.sqlite_client import SQLiteClient
 
 logger = logging.getLogger(__name__)
 
 
 class SessionMonitor:
     """
-    Monitor Cursor sessions via Redis events.
+    Monitor Cursor sessions via Redis events with database persistence.
 
     Design:
-    - Redis stream events are the only source (extension required)
-    - Tracks active workspaces with metadata
+    - Redis stream events from extension (session_start/end)
+    - Tracks active sessions with metadata (session_id, workspace_path)
+    - Persists sessions to SQLite database for durability
+    - Recovers incomplete sessions on startup
     """
 
-    def __init__(self, redis_client: redis.Redis):
-        self.redis_client = redis_client
+    def __init__(self, redis_client: redis.Redis, sqlite_client: Optional[SQLiteClient] = None):
+        """
+        Initialize Cursor session monitor.
 
-        # Active sessions: workspace_hash -> session_info
+        Args:
+            redis_client: Redis client for event streaming
+            sqlite_client: Optional SQLite client for persistence (if None, persistence disabled)
+        """
+        self.redis_client = redis_client
+        self.sqlite_client = sqlite_client
+
+        # Active sessions: workspace_hash -> session_info (in-memory for fast lookups)
         self.active_sessions: Dict[str, dict] = {}
+        self._lock = threading.Lock()
 
         # Track last processed Redis message ID (for resuming)
         self.last_redis_id = "0-0"
 
+        # Session persistence (if sqlite_client provided)
+        self.persistence: Optional[CursorSessionPersistence] = None
+        if sqlite_client:
+            self.persistence = CursorSessionPersistence(sqlite_client)
+
         self.running = False
 
     async def start(self):
-        """Start monitoring sessions."""
+        """
+        Start monitoring sessions with recovery.
+        
+        Steps:
+        1. Recover incomplete sessions from database (if persistence enabled)
+        2. Catch up on historical Redis events
+        3. Start listening to new Redis events
+        """
         self.running = True
 
-        # Process historical events first (catch up on existing sessions)
+        # Step 1: Recover incomplete sessions from last run (if persistence enabled)
+        if self.persistence:
+            await self._recover_active_sessions()
+
+        # Step 2: Process historical events first (catch up on existing sessions)
         await self._catch_up_historical_events()
 
-        # Start Redis event listener
-        asyncio.create_task(self._listen_redis_events())
+        persistence_status = "with database persistence" if self.persistence else "(in-memory only)"
+        logger.info(f"Cursor session monitor started {persistence_status}")
 
-        logger.info("Session monitor started (Redis events only)")
+        # Step 3: Run Redis event listener directly (blocks until stopped)
+        await self._listen_redis_events()
+
+    async def _recover_active_sessions(self):
+        """Recover active sessions from database."""
+        if not self.persistence:
+            return
+        
+        try:
+            recovered = await self.persistence.recover_active_sessions()
+            with self._lock:
+                for external_session_id, session_info in recovered.items():
+                    workspace_hash = session_info.get('workspace_hash')
+                    if workspace_hash:
+                        self.active_sessions[workspace_hash] = session_info
+            logger.info(f"Recovered {len(recovered)} active Cursor sessions from database")
+        except Exception as e:
+            logger.error(f"Failed to recover active sessions: {e}", exc_info=True)
 
     async def _catch_up_historical_events(self):
         """Process all historical session_start events from Redis."""
@@ -144,19 +193,55 @@ class SessionMonitor:
                 return
 
             if event_type == 'session_start':
-                self.active_sessions[workspace_hash] = {
-                    "session_id": session_id,
+                # Extract workspace_name from metadata if available
+                workspace_name = metadata.get('workspace_name') or payload.get('workspace_name') or ''
+                
+                # Persist to database (durable)
+                internal_session_id = None
+                if self.persistence:
+                    try:
+                        internal_session_id = await self.persistence.save_session_start(
+                            external_session_id=session_id,
+                            workspace_hash=workspace_hash,
+                            workspace_path=workspace_path,
+                            workspace_name=workspace_name,
+                            metadata=metadata
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to persist session start: {e}")
+                        # Continue with in-memory tracking
+                
+                # Add to in-memory dict (fast path)
+                session_info = {
+                    "session_id": internal_session_id or session_id,  # Use internal ID if available
+                    "external_session_id": session_id,
                     "workspace_hash": workspace_hash,
                     "workspace_path": workspace_path,
+                    "workspace_name": workspace_name,
                     "started_at": asyncio.get_event_loop().time(),
                     "source": "redis",
                 }
-                logger.info(f"Session started: {workspace_hash} -> {session_id}")
+                
+                with self._lock:
+                    self.active_sessions[workspace_hash] = session_info
+                
+                logger.info(f"Cursor session started: {workspace_hash} -> {session_id}")
 
             elif event_type == 'session_end':
-                if workspace_hash in self.active_sessions:
-                    del self.active_sessions[workspace_hash]
-                    logger.info(f"Session ended: {workspace_hash}")
+                # Update database first (ensure durability)
+                if self.persistence:
+                    try:
+                        await self.persistence.save_session_end(session_id, end_reason='normal')
+                    except Exception as e:
+                        logger.error(f"Failed to persist session end: {e}")
+                
+                # Then remove from memory
+                with self._lock:
+                    removed = self.active_sessions.pop(workspace_hash, None)
+                    if removed:
+                        logger.info(f"Cursor session ended: {workspace_hash}")
+                    else:
+                        logger.debug(f"Session end for unknown workspace: {workspace_hash}")
 
         except Exception as e:
             logger.error(f"Error processing Redis message {msg_id}: {e}")
