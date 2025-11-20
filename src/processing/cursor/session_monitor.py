@@ -164,7 +164,12 @@ class SessionMonitor:
         try:
             # Decode fields
             event_type = self._decode_field(fields, 'event_type')
+            platform = self._decode_field(fields, 'platform')
             hook_type = self._decode_field(fields, 'hook_type')
+
+            # Only process Cursor session events
+            if platform != 'cursor':
+                return
 
             # Only process session events
             if event_type not in ('session_start', 'session_end'):
@@ -273,6 +278,37 @@ class SessionMonitor:
         """Get workspace path for hash."""
         session = self.active_sessions.get(workspace_hash)
         return session.get("workspace_path") if session else None
+
+    def remove_session_by_workspace_hash(self, workspace_hash: str) -> bool:
+        """
+        Remove session from memory by workspace hash.
+        
+        Args:
+            workspace_hash: Workspace hash identifier
+            
+        Returns:
+            True if session was removed, False if not found
+        """
+        with self._lock:
+            removed = self.active_sessions.pop(workspace_hash, None)
+            return removed is not None
+
+    def remove_session_by_external_id(self, external_session_id: str) -> bool:
+        """
+        Remove session from memory by external session ID.
+        
+        Args:
+            external_session_id: External session ID from Cursor extension
+            
+        Returns:
+            True if session was removed, False if not found
+        """
+        with self._lock:
+            for workspace_hash, session_info in list(self.active_sessions.items()):
+                if session_info.get('external_session_id') == external_session_id:
+                    del self.active_sessions[workspace_hash]
+                    return True
+            return False
 
 
 

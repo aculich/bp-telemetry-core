@@ -25,6 +25,7 @@ from .fast_path.cdc_publisher import CDCPublisher
 from .cursor.session_monitor import SessionMonitor
 from .cursor.database_monitor import CursorDatabaseMonitor
 from .cursor.markdown_monitor import CursorMarkdownMonitor
+from .cursor.session_timeout import CursorSessionTimeoutManager
 from .claude_code.transcript_monitor import ClaudeCodeTranscriptMonitor
 from .claude_code.session_monitor import ClaudeCodeSessionMonitor
 from .claude_code.jsonl_monitor import ClaudeCodeJSONLMonitor
@@ -62,6 +63,7 @@ class TelemetryServer:
         self.cdc_publisher: Optional[CDCPublisher] = None
         self.consumer: Optional[FastPathConsumer] = None
         self.session_monitor: Optional[SessionMonitor] = None
+        self.cursor_timeout_manager: Optional[CursorSessionTimeoutManager] = None
         self.cursor_monitor: Optional[CursorDatabaseMonitor] = None
         self.markdown_monitor: Optional[CursorMarkdownMonitor] = None
         self.claude_code_monitor: Optional[ClaudeCodeTranscriptMonitor] = None
@@ -206,6 +208,14 @@ class TelemetryServer:
             sqlite_client=self.sqlite_client
         )
 
+        # Create timeout manager for abandoned sessions
+        self.cursor_timeout_manager = CursorSessionTimeoutManager(
+            session_monitor=self.session_monitor,
+            sqlite_client=self.sqlite_client,
+            timeout_hours=24,
+            cleanup_interval=3600.0
+        )
+
         # Create database monitor
         self.cursor_monitor = CursorDatabaseMonitor(
             redis_client=self.redis_client,
@@ -332,24 +342,41 @@ class TelemetryServer:
             self._initialize_claude_code_monitor()
 
             # Start monitors in background threads (if enabled)
-            if self.session_monitor and self.cursor_monitor:
+            if self.session_monitor:
                 def run_session_monitor():
                     import asyncio
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     loop.run_until_complete(self.session_monitor.start())
                 
+                session_thread = threading.Thread(target=run_session_monitor, daemon=True)
+                session_thread.start()
+                self.monitor_threads.append(session_thread)
+                logger.info("Cursor session monitor started")
+            
+            if self.cursor_monitor:
                 def run_cursor_monitor():
                     import asyncio
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     loop.run_until_complete(self.cursor_monitor.start())
                 
-                session_thread = threading.Thread(target=run_session_monitor, daemon=True)
                 cursor_thread = threading.Thread(target=run_cursor_monitor, daemon=True)
-                session_thread.start()
                 cursor_thread.start()
-                self.monitor_threads.extend([session_thread, cursor_thread])
+                self.monitor_threads.append(cursor_thread)
+                logger.info("Cursor database monitor started")
+            
+            if self.cursor_timeout_manager:
+                def run_cursor_timeout_manager():
+                    import asyncio
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(self.cursor_timeout_manager.start())
+                
+                cursor_timeout_thread = threading.Thread(target=run_cursor_timeout_manager, daemon=True)
+                cursor_timeout_thread.start()
+                self.monitor_threads.append(cursor_timeout_thread)
+                logger.info("Cursor session timeout manager started")
 
             # Start markdown monitor (if enabled)
             if self.markdown_monitor:
@@ -437,6 +464,13 @@ class TelemetryServer:
 
         logger.info("Stopping server...")
         self.running = False
+
+        # Stop Cursor timeout manager
+        if self.cursor_timeout_manager:
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self.cursor_timeout_manager.stop())
 
         # Stop Claude Code monitors
         if self.claude_timeout_manager:

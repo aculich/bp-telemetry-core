@@ -700,52 +700,75 @@ def migrate_to_v2(client: SQLiteClient) -> None:
             
             # Step 3: Migrate Cursor sessions from conversations to cursor_sessions
             logger.info("Step 2: Migrating Cursor sessions...")
+            
+            # First, verify we have Cursor conversations
             cursor = conn.execute("""
-                SELECT DISTINCT
-                    external_session_id,
-                    workspace_hash,
-                    workspace_name,
-                    MIN(started_at) as started_at,
-                    MAX(ended_at) as ended_at,
-                    json_extract(context, '$.workspace_path') as workspace_path
-                FROM conversations
-                WHERE platform = 'cursor'
-                GROUP BY external_session_id, workspace_hash
+                SELECT COUNT(*) FROM conversations WHERE platform = 'cursor'
             """)
+            cursor_count = cursor.fetchone()[0]
+            logger.info(f"Found {cursor_count} Cursor conversations to process")
             
-            session_mapping = {}  # external_session_id -> new internal session_id
-            cursor_sessions_data = []
-            
-            for row in cursor.fetchall():
-                external_session_id = row[0]
-                workspace_hash = row[1] or ''
-                workspace_name = row[2]
-                started_at = row[3]
-                ended_at = row[4]
-                workspace_path = row[5] or ''
+            if cursor_count == 0:
+                logger.info("No Cursor conversations found, skipping session migration")
+                session_mapping = {}
+            else:
+                # Only select Cursor conversations with valid external_session_id
+                cursor = conn.execute("""
+                    SELECT DISTINCT
+                        external_session_id,
+                        workspace_hash,
+                        workspace_name,
+                        MIN(started_at) as started_at,
+                        MAX(ended_at) as ended_at,
+                        json_extract(context, '$.workspace_path') as workspace_path
+                    FROM conversations
+                    WHERE platform = 'cursor'
+                      AND external_session_id IS NOT NULL
+                      AND external_session_id != ''
+                    GROUP BY external_session_id, workspace_hash
+                """)
                 
-                # Generate new internal session ID
-                internal_session_id = str(uuid.uuid4())
-                session_mapping[external_session_id] = internal_session_id
+                session_mapping = {}  # external_session_id -> new internal session_id
+                cursor_sessions_data = []
                 
-                cursor_sessions_data.append((
-                    internal_session_id,
-                    external_session_id,
-                    workspace_hash,
-                    workspace_name,
-                    workspace_path,
-                    started_at,
-                    ended_at,
-                    json.dumps({})  # metadata
-                ))
-            
-            if cursor_sessions_data:
-                conn.executemany("""
-                    INSERT OR IGNORE INTO cursor_sessions 
-                    (id, external_session_id, workspace_hash, workspace_name, workspace_path, started_at, ended_at, metadata)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, cursor_sessions_data)
-                logger.info(f"Migrated {len(cursor_sessions_data)} Cursor sessions")
+                for row in cursor.fetchall():
+                    external_session_id = row[0]
+                    workspace_hash = row[1] or ''
+                    workspace_name = row[2]
+                    started_at = row[3]
+                    ended_at = row[4]
+                    workspace_path = row[5] or ''
+                    
+                    # Validate we have required fields
+                    if not external_session_id or not workspace_hash:
+                        logger.warning(f"Skipping invalid Cursor session: external_session_id={external_session_id}, workspace_hash={workspace_hash}")
+                        continue
+                    
+                    # Generate new internal session ID
+                    internal_session_id = str(uuid.uuid4())
+                    session_mapping[external_session_id] = internal_session_id
+                    
+                    cursor_sessions_data.append((
+                        internal_session_id,
+                        external_session_id,
+                        workspace_hash,
+                        workspace_name,
+                        workspace_path,
+                        started_at,
+                        ended_at,
+                        json.dumps({})  # metadata
+                    ))
+                
+                if cursor_sessions_data:
+                    conn.executemany("""
+                        INSERT OR IGNORE INTO cursor_sessions 
+                        (id, external_session_id, workspace_hash, workspace_name, workspace_path, started_at, ended_at, metadata)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, cursor_sessions_data)
+                    logger.info(f"Migrated {len(cursor_sessions_data)} Cursor sessions")
+                else:
+                    logger.warning("No valid Cursor sessions found to migrate")
+                    session_mapping = {}
             
             # Step 4: Create new conversations table
             logger.info("Step 3: Creating new conversations table schema...")
@@ -790,14 +813,24 @@ def migrate_to_v2(client: SQLiteClient) -> None:
                 
                 # Determine session_id and external_id
                 if platform == 'cursor':
+                    # Validate this is actually a Cursor conversation
+                    if not external_session_id:
+                        logger.warning(f"Cursor conversation {conversation_id} missing external_session_id, skipping")
+                        continue
+                    
                     # Look up new internal session_id
                     new_session_id = session_mapping.get(external_session_id)
                     if not new_session_id:
-                        logger.warning(f"No session mapping found for {external_session_id}, skipping conversation {conversation_id}")
+                        logger.warning(f"No session mapping found for Cursor conversation {conversation_id} with external_session_id={external_session_id}, skipping")
                         continue
                     external_id = external_session_id  # For now, use external_session_id as external_id
-                else:
+                elif platform == 'claude_code':
                     # Claude Code: session_id is NULL, external_id is the session/conversation ID
+                    new_session_id = None
+                    external_id = external_session_id or conversation_id
+                else:
+                    # Unknown platform - skip or handle as Claude Code
+                    logger.warning(f"Unknown platform '{platform}' for conversation {conversation_id}, treating as Claude Code")
                     new_session_id = None
                     external_id = external_session_id or conversation_id
             

@@ -75,24 +75,39 @@ class CursorSessionPersistence:
             }
             
             # Insert into cursor_sessions table
+            # Use INSERT OR IGNORE to avoid overwriting existing sessions
+            # If session already exists, get its internal ID
             with self.sqlite_client.get_connection() as conn:
+                # Check if session already exists
                 cursor = conn.execute("""
-                    INSERT OR REPLACE INTO cursor_sessions (
-                        id, external_session_id, workspace_hash,
-                        workspace_name, workspace_path, started_at, metadata
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    internal_session_id,
-                    external_session_id,
-                    workspace_hash,
-                    workspace_name,
-                    workspace_path,
-                    datetime.now(timezone.utc).isoformat(),
-                    json.dumps(session_metadata),
-                ))
-                conn.commit()
+                    SELECT id FROM cursor_sessions
+                    WHERE external_session_id = ?
+                """, (external_session_id,))
                 
-            logger.info(f"Persisted Cursor session start: {external_session_id} -> {internal_session_id}")
+                existing = cursor.fetchone()
+                if existing:
+                    # Session already exists, return existing internal ID
+                    internal_session_id = existing[0]
+                    logger.debug(f"Cursor session {external_session_id} already exists, using existing internal ID: {internal_session_id}")
+                else:
+                    # Insert new session
+                    cursor = conn.execute("""
+                        INSERT INTO cursor_sessions (
+                            id, external_session_id, workspace_hash,
+                            workspace_name, workspace_path, started_at, metadata
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        internal_session_id,
+                        external_session_id,
+                        workspace_hash,
+                        workspace_name,
+                        workspace_path,
+                        datetime.now(timezone.utc).isoformat(),
+                        json.dumps(session_metadata),
+                    ))
+                    conn.commit()
+                    logger.info(f"Persisted Cursor session start: {external_session_id} -> {internal_session_id}")
+                
             return internal_session_id
 
         except Exception as e:
@@ -275,4 +290,24 @@ class CursorSessionPersistence:
         except Exception as e:
             logger.error(f"Failed to recover active sessions: {e}", exc_info=True)
             return {}
+
+    async def mark_session_timeout(
+        self,
+        external_session_id: str,
+        last_activity: datetime
+    ) -> None:
+        """
+        Mark abandoned Cursor session as timed out.
+        
+        Called by cleanup task for stale sessions.
+
+        Args:
+            external_session_id: External session ID from Cursor extension
+            last_activity: Last known activity timestamp
+        """
+        try:
+            await self.save_session_end(external_session_id, end_reason='timeout')
+            logger.info(f"Marked Cursor session {external_session_id} as timed out (last activity: {last_activity})")
+        except Exception as e:
+            logger.error(f"Failed to mark Cursor session timeout for {external_session_id}: {e}", exc_info=True)
 
