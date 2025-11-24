@@ -155,28 +155,64 @@ function stripHomePrefix(pathStr: string | undefined | null): string | null {
 
 /**
  * Find config.yaml in standard locations.
- * Search order:
- * 1. Project root (../../../../../../config/config.yaml from src/capture/cursor/extension/src/)
- * 2. ~/.blueplane/config.yaml
+ * Search order (highest to lowest precedence):
+ * 1. User override: ~/.blueplane/config.yaml (user override, highest precedence)
+ * 2. Bundled config: out/config/config.yaml (relative to extension installation - works in VSIX)
+ * 3. Development config: Project root config/config.yaml (for development mode)
  */
 function findConfigFile(): string | null {
-  const searchPaths = [
-    // Relative to extension source (src/capture/cursor/extension/src/config.ts)
-    // Go up to project root: ../../../../../.. then into config/
-    path.join(__dirname, "..", "..", "..", "..", "..", "config", "config.yaml"),
+  const os = require("os");
 
-    // User home directory
-    path.join(require("os").homedir(), ".blueplane", "config.yaml"),
-  ];
+  // 1. User override (highest precedence)
+  // This takes precedence over all bundled configs
+  const userConfigPath = path.join(os.homedir(), ".blueplane", "config.yaml");
+  try {
+    if (fs.existsSync(userConfigPath)) {
+      return userConfigPath;
+    }
+  } catch (error) {
+    // Continue searching on error (permissions, etc.)
+  }
 
-  for (const searchPath of searchPaths) {
+  // 2. Bundled config (for VSIX installations)
+  // When packaged, config is at out/config/config.yaml relative to extension.js
+  // __dirname points to out/ directory where extension.js lives
+  const bundledConfigPath = path.join(__dirname, "config", "config.yaml");
+  try {
+    if (fs.existsSync(bundledConfigPath)) {
+      return bundledConfigPath;
+    }
+  } catch (error) {
+    // Continue searching on error
+  }
+
+  // 3. Development config (for development mode)
+  // Try to find project root config/config.yaml
+  // Walk up from out/ to find project root
+  let current = __dirname; // Start at out/
+  for (let i = 0; i < 10; i++) {
+    // Safety limit: don't walk too far up
+    const projectConfigPath = path.join(
+      current,
+      "..",
+      "..",
+      "..",
+      "config",
+      "config.yaml"
+    );
     try {
-      if (fs.existsSync(searchPath)) {
-        return searchPath;
+      if (fs.existsSync(projectConfigPath)) {
+        return projectConfigPath;
       }
     } catch (error) {
       // Continue searching
     }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      // Reached filesystem root
+      break;
+    }
+    current = parent;
   }
 
   return null;

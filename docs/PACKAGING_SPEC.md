@@ -135,7 +135,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY src/ ./src/
-COPY config/ ./config/
+
+# Copy configuration files (default config.yaml and schema)
+# User overrides are mounted from ~/.blueplane/config.yaml at runtime
+COPY config/config.yaml ./config/config.yaml
+COPY config/config.schema.yaml ./config/config.schema.yaml
 
 # Set ownership
 RUN chown -R blueplane:blueplane /app
@@ -150,6 +154,8 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 # Entry point
 ENTRYPOINT ["python", "-m", "src.processing.server"]
 ```
+
+**Configuration Loading**: The Python server loads config from `/app/config/config.yaml` (bundled default) but will prefer `/data/blueplane/config.yaml` (user override) if mounted. See Section 8.3 for configuration precedence.
 
 ## 4. Python Package Structure
 
@@ -271,8 +277,13 @@ where = ["."]
 include = ["src*"]
 
 [tool.setuptools.package-data]
-"*" = ["*.yaml", "*.json"]
+# Include config files from config/ directory
+"config" = ["*.yaml", "*.yml"]
+# Include any YAML/JSON files in src/ tree (for future use)
+"src" = ["*.yaml", "*.yml", "*.json"]
 ```
+
+**Configuration Files**: The `config/` directory containing `config.yaml` and `config.schema.yaml` is included in the Python package. When installed via pip, these files are available at the package installation location. The Python code searches multiple locations (see Section 8.3) to find configuration files.
 
 **Note**: The package structure uses direct `src.*` imports rather than a `blueplane.*` namespace. Entry points reference `src.cli.main` and `src.processing.server` directly. Dependencies reflect the actual `requirements.txt` in use.
 
@@ -289,14 +300,31 @@ cd src/capture/cursor/extension
 # Install dependencies
 npm install
 
-# Compile TypeScript
-npm run compile
-
-# Package as VSIX (output to extension directory)
+# Build VSIX (compile + copy config happens automatically via vscode:prepublish)
 npx vsce package
 
 echo "VSIX built: src/capture/cursor/extension/blueplane-cursor-telemetry-*.vsix"
 ```
+
+**Configuration Bundling**: The `package.json` includes a `copy-config` script that runs automatically during `vscode:prepublish`:
+
+```json
+{
+  "scripts": {
+    "vscode:prepublish": "npm run compile && npm run copy-config",
+    "copy-config": "mkdir -p out/config && cp ../../../../config/config.yaml out/config/config.yaml"
+  },
+  "files": ["out/**/*", "config/**/*"]
+}
+```
+
+This ensures `config.yaml` is copied to `out/config/` and included in the VSIX package. At runtime, the extension searches for config in this order (highest to lowest precedence):
+
+1. **User override**: `~/.blueplane/config.yaml` (user override, highest precedence)
+2. **Bundled config**: `out/config/config.yaml` (relative to extension installation - works in VSIX)
+3. **Development config**: Project root `config/config.yaml` (for development mode only)
+
+The extension uses `__dirname` (which points to `out/` where `extension.js` lives) to locate the bundled config, ensuring it works correctly in both VSIX installations and development mode.
 
 **Convention**: The VSIX file is built directly in the extension directory (`src/capture/cursor/extension/`) and should be gitignored. This keeps build artifacts colocated with their source.
 
@@ -389,7 +417,35 @@ def verify_hooks():
 
 ## 7. Unified Installer Implementation
 
-### 7.1 Main Installation Script
+### 7.1 Configuration Installation
+
+The installer must ensure configuration files are properly installed:
+
+```bash
+# Install default config to user directory
+install_config() {
+    echo -e "\n${BLUE}Installing configuration...${NC}"
+
+    BLUEPLANE_CONFIG_DIR="$HOME/.blueplane"
+    mkdir -p "$BLUEPLANE_CONFIG_DIR"
+
+    # Copy default config if user config doesn't exist
+    if [ ! -f "$BLUEPLANE_CONFIG_DIR/config.yaml" ]; then
+        cp config/config.yaml "$BLUEPLANE_CONFIG_DIR/config.yaml"
+        echo -e "${GREEN}✓ Default configuration installed${NC}"
+        echo -e "  Edit ${BLUE}$BLUEPLANE_CONFIG_DIR/config.yaml${NC} to customize"
+    else
+        echo -e "${YELLOW}⚠ User config already exists, skipping${NC}"
+        echo -e "  Using existing: ${BLUE}$BLUEPLANE_CONFIG_DIR/config.yaml${NC}"
+    fi
+
+    # Always copy schema for reference
+    cp config/config.schema.yaml "$BLUEPLANE_CONFIG_DIR/config.schema.yaml"
+    echo -e "${GREEN}✓ Configuration schema installed${NC}"
+}
+```
+
+### 7.2 Main Installation Script
 
 ```bash
 #!/bin/bash
@@ -553,6 +609,7 @@ verify_installation() {
 # Main installation flow
 main() {
     check_prerequisites
+    install_config
     install_python_package
     setup_docker
     install_claude_hooks
@@ -564,6 +621,7 @@ main() {
     echo -e "\n${GREEN}Installation complete!${NC}"
     echo -e "Run ${BLUE}bp status${NC} to check system status"
     echo -e "Run ${BLUE}bp help${NC} for available commands"
+    echo -e "\nConfiguration: ${BLUE}$HOME/.blueplane/config.yaml${NC}"
 }
 
 main "$@"
@@ -571,7 +629,71 @@ main "$@"
 
 ## 8. Configuration Management
 
-### 8.1 Configuration Structure
+### 8.1 Configuration File Bundling Strategy
+
+All components of Blueplane Telemetry Core use a unified `config.yaml` file located in the project root `config/` directory. This configuration must be bundled appropriately for each packaging target:
+
+#### 8.1.1 Python Package (pip install)
+
+**Location**: `config/config.yaml` and `config/config.schema.yaml` are included in the Python package via `pyproject.toml`:
+
+```toml
+[tool.setuptools.package-data]
+"config" = ["*.yaml", "*.yml"]
+```
+
+**Runtime Loading**: Python code (`src/capture/shared/config.py`) searches for config in this order:
+
+1. `~/.blueplane/config.yaml` (user override, highest precedence)
+2. Relative to source code: `config/config.yaml` (development)
+3. Package installation location (installed package)
+4. `/etc/blueplane/config.yaml` (system-wide)
+
+#### 8.1.2 Docker Container
+
+**Bundling**: Config files are explicitly copied in Dockerfile:
+
+```dockerfile
+COPY config/config.yaml ./config/config.yaml
+COPY config/config.schema.yaml ./config/config.schema.yaml
+```
+
+**Runtime Loading**: Container loads from `/app/config/config.yaml` (bundled default), but user can mount `~/.blueplane/config.yaml` to `/data/blueplane/config.yaml` for overrides.
+
+#### 8.1.3 Cursor Extension (VSIX)
+
+**Bundling**: Config is copied to `out/config/` before VSIX packaging:
+
+```bash
+mkdir -p out/config
+cp ../../../../config/config.yaml out/config/config.yaml
+```
+
+**Runtime Loading**: Extension (`src/capture/cursor/extension/src/config.ts`) searches in this order:
+
+1. `~/.blueplane/config.yaml` (user override, highest precedence)
+2. Bundled config: `out/config/config.yaml` (relative to extension installation - works in VSIX)
+3. Development config: Project root `config/config.yaml` (for development mode only)
+
+The extension uses `__dirname` to locate the bundled config relative to where `extension.js` is located, ensuring correct behavior in both packaged VSIX and development environments.
+
+**VSIX Package Contents**: Ensure `package.json` includes config files:
+
+```json
+{
+  "files": ["out/**/*", "config/**/*"]
+}
+```
+
+#### 8.1.4 Claude Hooks
+
+**Bundling**: Hooks are Python scripts that use the same config loading mechanism as the Python package. Config is loaded from:
+
+1. `~/.blueplane/config.yaml` (user override)
+2. Relative to hook location (if hooks are installed from source)
+3. Package installation location (if installed via pip)
+
+### 8.2 Configuration Structure
 
 ```yaml
 # ~/.blueplane/config/main.yaml
@@ -625,7 +747,22 @@ logging:
   backup_count: 5
 ```
 
-### 8.2 Debug Mode Configuration
+### 8.3 Configuration Precedence
+
+Configuration files are loaded with the following precedence (highest to lowest):
+
+1. **User Override**: `~/.blueplane/config.yaml` (always takes precedence)
+2. **Bundled Default**: Component-specific bundled config
+   - Python package: Package installation location
+   - Docker: `/app/config/config.yaml`
+   - Extension: `out/config/config.yaml` (bundled in VSIX)
+3. **Schema Defaults**: Values defined in `config.schema.yaml`
+
+**Merging Strategy**: User config (`~/.blueplane/config.yaml`) merges with defaults. Only specified keys override; unspecified keys use defaults from bundled config or schema.
+
+**Installation**: The installer script (`installers/install.sh`) copies `config/config.yaml` to `~/.blueplane/config.yaml` during installation, allowing users to customize settings.
+
+### 8.4 Debug Mode Configuration
 
 ```yaml
 # ~/.blueplane/config/debug.yaml
@@ -874,6 +1011,49 @@ rm -rf ~/.claude/projects/test
 - Windows support (WSL2)
 - Additional IDE support (VSCode, IntelliJ)
 
+## 14. Future Packaging Targets
+
+### 14.1 General Configuration Bundling Principles
+
+For any future packaging target (Homebrew, system packages, standalone binaries, etc.), follow these principles:
+
+1. **Always Bundle Default Config**: Include `config/config.yaml` as the default configuration
+2. **Respect User Overrides**: User config at `~/.blueplane/config.yaml` always takes precedence
+3. **Document Config Location**: Clearly document where bundled config is located for each packaging format
+4. **Schema Reference**: Include `config.schema.yaml` for documentation/reference
+
+### 14.2 Homebrew Formula (Future)
+
+```ruby
+# Formula would install config to:
+# - Default: /opt/homebrew/etc/blueplane/config.yaml (Apple Silicon)
+# - Default: /usr/local/etc/blueplane/config.yaml (Intel)
+# - User override: ~/.blueplane/config.yaml (always preferred)
+```
+
+### 14.3 System Packages (deb/rpm) (Future)
+
+- **Default config**: `/etc/blueplane/config.yaml` (system-wide)
+- **User override**: `~/.blueplane/config.yaml` (per-user, takes precedence)
+- **Schema**: `/usr/share/doc/blueplane-telemetry/config.schema.yaml`
+
+### 14.4 Standalone Binaries (Future)
+
+- Bundle config as embedded resource or separate file in distribution
+- User override at `~/.blueplane/config.yaml` always takes precedence
+- Document config location in distribution README
+
+### 14.5 Configuration Search Order (Universal)
+
+All components should search for config in this order:
+
+1. **User Override**: `~/.blueplane/config.yaml` (highest precedence)
+2. **Bundled Default**: Component-specific location (package-dependent)
+3. **System Default**: `/etc/blueplane/config.yaml` (if applicable)
+4. **Schema Defaults**: Hardcoded defaults from `config.schema.yaml`
+
+This ensures consistent behavior across all packaging formats.
+
 ## Appendix A: Error Codes
 
 | Code | Description                      | Resolution                 |
@@ -889,7 +1069,11 @@ rm -rf ~/.claude/projects/test
 | Component                  | Location                                                                   |
 | -------------------------- | -------------------------------------------------------------------------- |
 | SQLite Database            | `~/.blueplane/telemetry.db`                                                |
-| Configuration              | `~/.blueplane/config/`                                                     |
+| User Configuration         | `~/.blueplane/config.yaml` (user overrides)                                |
+| Default Configuration      | `~/.blueplane/config.schema.yaml` (reference schema)                       |
+| Bundled Config (Python)    | Package installation location (via pip)                                    |
+| Bundled Config (Docker)    | `/app/config/config.yaml` (inside container)                               |
+| Bundled Config (Extension) | Extension installation directory `out/config/config.yaml` (in VSIX)        |
 | Logs                       | `~/.blueplane/logs/`                                                       |
 | Claude Hooks               | `~/.claude/hooks/telemetry/`                                               |
 | Claude Projects            | `~/.claude/projects/`                                                      |
