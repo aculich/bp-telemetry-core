@@ -21,6 +21,27 @@ bd complete <issue-id>      # Mark as done
 
 See the beads documentation for full command reference. All development work should be tracked as beads issues.
 
+### Initializing Beads in a New Worktree
+
+When checking out a new git worktree, the `.beads/beads.db` file (SQLite cache) won't exist because it's gitignored. The source of truth is `.beads/issues.jsonl` (git-tracked).
+
+**Agent initialization workflow:**
+
+1. **Check if beads is available**: Verify `.beads/` directory exists
+2. **If `beads.db` is missing but `issues.jsonl` exists**: Run `bd sync --import-only` to import issues from JSONL into the local database cache
+3. **Then proceed with normal session start**: Run `bd ready --json` to check available work
+
+**Example initialization:**
+```bash
+# After checking out new worktree
+if [ -d .beads ] && [ -f .beads/issues.jsonl ] && [ ! -f .beads/beads.db ]; then
+    bd sync --import-only
+fi
+bd ready --json
+```
+
+**Note**: Beads will auto-import from JSONL on first command if the database is missing, but explicitly running `bd sync --import-only` ensures the database is initialized before checking for work.
+
 ## Project Overview
 
 **Blueplane Telemetry Core** is a privacy-first, local-only telemetry and analytics system for AI-assisted coding platforms (Claude Code, Cursor, etc.). All data stays on the developer's machine with zero cloud transmission.
