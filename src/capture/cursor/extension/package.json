@@ -60,8 +60,7 @@
     "test": "node ./out/test/runTest.js"
   },
   "files": [
-    "out/**/*",
-    "config/**/*"
+    "out/**/*"
   ],
   "devDependencies": {
     "@types/js-yaml": "^4.0.0",
