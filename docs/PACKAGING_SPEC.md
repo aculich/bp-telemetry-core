@@ -34,7 +34,10 @@ Host System (macOS)
 │       └── ~/.claude/hooks/telemetry/ (Hooks) [INSTALLED]
 │
 ├── Cursor Application
+│   ├── ~/Library/Application Support/Cursor/User/globalStorage/state.vscdb [READ]
+│   │   └── Table: cursorDiskKV (global conversation data)
 │   ├── ~/Library/Application Support/Cursor/User/workspaceStorage/*/state.vscdb [READ]
+│   │   └── Table: ItemTable (workspace-specific data)
 │   └── Extension (VSIX) [INSTALLED]
 │
 ├── Docker Desktop
@@ -59,6 +62,7 @@ Host System (macOS)
 ### 3.1 Container Definitions
 
 #### Redis Container
+
 ```yaml
 service: redis
 image: redis:7-alpine
@@ -75,6 +79,7 @@ healthcheck:
 ```
 
 #### Processing Server Container
+
 ```yaml
 service: blueplane-server
 build:
@@ -191,7 +196,7 @@ build-backend = "setuptools.build_meta"
 name = "blueplane-telemetry"
 version = "0.1.0"
 description = "Privacy-first telemetry for AI-assisted coding"
-authors = [{name = "Sierra Labs", email = "support@blueplane.io"}]
+authors = [{name = "Sierra Labs", email = "support@blueplane.ai"}]
 license = {text = "AGPL-3.0-only"}
 requires-python = ">=3.9"
 dependencies = [
@@ -259,11 +264,13 @@ cursor --install-extension extensions/cursor/blueplane-telemetry.vsix
 ### 5.3 Auto-Update Strategy (Fast-Follow)
 
 **Option 1: GitHub Release Checking**
+
 - Extension periodically checks GitHub releases API
 - Notifies user when new version available
 - Downloads and prompts for installation
 
 **Option 2: Custom Update Server**
+
 - Host simple version manifest on CDN
 - Extension checks version on startup
 - Auto-download and install with user consent
@@ -719,11 +726,16 @@ image: blueplane/telemetry-server:latest
 ### 11.3 One-Line Installer
 
 ```bash
-# Host installer script on CDN/GitHub
-curl -sSL https://raw.githubusercontent.com/blueplane/telemetry-core/main/installers/install.sh | bash
+# Install from main branch (latest)
+curl -sSL https://raw.githubusercontent.com/blueplane-ai/bp-telemetry-core/main/installers/install.sh | bash
 
-# Or with specific version
-curl -sSL https://blueplane.io/install/v1.0.0 | bash
+# Install specific version (using Git tags)
+curl -sSL https://raw.githubusercontent.com/blueplane-ai/bp-telemetry-core/v1.0.0/installers/install.sh | bash
+
+# Recommended: Review before running
+curl -sSL https://raw.githubusercontent.com/blueplane-ai/bp-telemetry-core/main/installers/install.sh -o install.sh
+cat install.sh  # Review the script
+bash install.sh
 ```
 
 ## 12. Verification and Testing
@@ -772,66 +784,72 @@ rm -rf ~/.claude/projects/test
 ## 13. Fast-Follow Roadmap
 
 ### Phase 1: Core Features (v1.0)
+
 - ✅ Docker-based installation
 - ✅ Basic CLI interface
 - ✅ Claude hooks and Cursor extension
 - ✅ macOS support
 
 ### Phase 2: Enhanced Monitoring (v1.1)
+
 - Monitoring dashboard in Python server
 - Prometheus metrics export
 - Grafana dashboard templates
 - Container health monitoring
 
 ### Phase 3: Operations (v1.2)
+
 - Backup and restore procedures
 - Log aggregation and rotation
 - Database migration framework
 - Data export formats (CSV, JSON, Parquet)
 
 ### Phase 4: Developer Experience (v1.3)
+
 - Hot reload for development
 - Development vs production configs
 - VSIX auto-update mechanism
 - Extension configuration UI
 
 ### Phase 5: Platform Expansion (v2.0)
+
 - Linux support
 - Windows support (WSL2)
 - Additional IDE support (VSCode, IntelliJ)
 
 ## Appendix A: Error Codes
 
-| Code | Description | Resolution |
-|------|-------------|------------|
-| E001 | Docker not installed | Install Docker Desktop |
-| E002 | Redis connection failed | Check Docker containers |
-| E003 | Database initialization failed | Check disk space |
-| E004 | Claude hooks installation failed | Check permissions |
-| E005 | Cursor extension build failed | Check Node.js installation |
+| Code | Description                      | Resolution                 |
+| ---- | -------------------------------- | -------------------------- |
+| E001 | Docker not installed             | Install Docker Desktop     |
+| E002 | Redis connection failed          | Check Docker containers    |
+| E003 | Database initialization failed   | Check disk space           |
+| E004 | Claude hooks installation failed | Check permissions          |
+| E005 | Cursor extension build failed    | Check Node.js installation |
 
 ## Appendix B: File Locations
 
-| Component | Location |
-|-----------|----------|
-| SQLite Database | `~/.blueplane/telemetry.db` |
-| Configuration | `~/.blueplane/config/` |
-| Logs | `~/.blueplane/logs/` |
-| Claude Hooks | `~/.claude/hooks/telemetry/` |
-| Claude Projects | `~/.claude/projects/` |
-| Cursor Databases | `~/Library/Application Support/Cursor/User/workspaceStorage/*/state.vscdb` |
-| Docker Compose | `~/.blueplane/docker-compose.yml` |
-| Launch Agent | `~/Library/LaunchAgents/io.blueplane.telemetry.plist` |
+| Component                  | Location                                                                   |
+| -------------------------- | -------------------------------------------------------------------------- |
+| SQLite Database            | `~/.blueplane/telemetry.db`                                                |
+| Configuration              | `~/.blueplane/config/`                                                     |
+| Logs                       | `~/.blueplane/logs/`                                                       |
+| Claude Hooks               | `~/.claude/hooks/telemetry/`                                               |
+| Claude Projects            | `~/.claude/projects/`                                                      |
+| Cursor User Database       | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`      |
+| Cursor Workspace Databases | `~/Library/Application Support/Cursor/User/workspaceStorage/*/state.vscdb` |
+| Docker Compose             | `~/.blueplane/docker-compose.yml`                                          |
+| Launch Agent               | `~/Library/LaunchAgents/io.blueplane.telemetry.plist`                      |
 
 ## Appendix C: Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `WORKSPACE_DIR` | `~/Dev` | Root directory for workspace monitoring |
-| `BP_DEBUG` | `false` | Enable debug mode |
-| `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
-| `REDIS_HOST` | `localhost` | Redis server hostname |
-| `REDIS_PORT` | `6379` | Redis server port |
+| Variable        | Default     | Description                                 |
+| --------------- | ----------- | ------------------------------------------- |
+| `WORKSPACE_DIR` | `~/Dev`     | Root directory for workspace monitoring     |
+| `BP_DEBUG`      | `false`     | Enable debug mode                           |
+| `LOG_LEVEL`     | `INFO`      | Logging level (DEBUG, INFO, WARNING, ERROR) |
+| `REDIS_HOST`    | `localhost` | Redis server hostname                       |
+| `REDIS_PORT`    | `6379`      | Redis server port                           |
 
 ---
 
